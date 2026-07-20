@@ -12,8 +12,10 @@ import {
 } from "react-leaflet";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
-import type { TrackPoint } from "@/lib/types";
+import type { GeorefPair, TrackPoint } from "@/lib/types";
+import { fitAffine, mapToGps } from "@/lib/georef";
 import { trackTouchesControl } from "@/lib/sync";
+import RotatedImageOverlay from "./RotatedImageOverlay";
 
 export interface GpsControlMarker {
   code: string;
@@ -35,6 +37,12 @@ interface Props {
   selectedSequence?: number;
   onPlace: (lat: number, lon: number) => void;
   center?: [number, number];
+  /** Georeferenced orienteering map (shown under tracks) */
+  mapUrl?: string | null;
+  mapWidth?: number;
+  mapHeight?: number;
+  georef?: GeorefPair[];
+  mapOpacity?: number;
 }
 
 function ClickHandler({
@@ -80,23 +88,53 @@ export default function GpsControlMap({
   selectedSequence,
   onPlace,
   center = [59.33, 18.065],
+  mapUrl = null,
+  mapWidth = 0,
+  mapHeight = 0,
+  georef = [],
+  mapOpacity = 0.55,
 }: Props) {
   const touchByControl = useMemo(() => {
-    const map = new Map<number, { hit: number; total: number; runners: { name: string; color: string; hit: boolean }[] }>();
+    const out = new Map<
+      number,
+      {
+        hit: number;
+        total: number;
+        runners: { name: string; color: string; hit: boolean }[];
+      }
+    >();
     for (const c of controls) {
       const runners = tracks.map((t) => ({
         name: t.name,
         color: t.color,
         hit: trackTouchesControl(t.points, c),
       }));
-      map.set(c.sequence, {
+      out.set(c.sequence, {
         hit: runners.filter((r) => r.hit).length,
         total: runners.length,
         runners,
       });
     }
-    return map;
+    return out;
   }, [controls, tracks]);
+
+  const overlayCorners = useMemo(() => {
+    if (!mapUrl || mapWidth <= 0 || mapHeight <= 0 || georef.length < 3) {
+      return null;
+    }
+    const affine = fitAffine(georef);
+    if (!affine) return null;
+    const tl = mapToGps(affine, { x: 0, y: 0 });
+    const tr = mapToGps(affine, { x: mapWidth, y: 0 });
+    const bl = mapToGps(affine, { x: 0, y: mapHeight });
+    return {
+      topLeft: [tl.lat, tl.lon] as [number, number],
+      topRight: [tr.lat, tr.lon] as [number, number],
+      bottomLeft: [bl.lat, bl.lon] as [number, number],
+    };
+  }, [mapUrl, mapWidth, mapHeight, georef]);
+
+  const hasMap = !!(mapUrl && overlayCorners);
 
   return (
     <MapContainer
@@ -108,9 +146,20 @@ export default function GpsControlMap({
       <TileLayer
         attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a>'
         url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+        opacity={hasMap ? 0.4 : 1}
       />
       <ClickHandler onPlace={onPlace} />
       <FitView controls={controls} tracks={tracks} />
+
+      {hasMap && mapUrl && overlayCorners && (
+        <RotatedImageOverlay
+          url={mapUrl}
+          topLeft={overlayCorners.topLeft}
+          topRight={overlayCorners.topRight}
+          bottomLeft={overlayCorners.bottomLeft}
+          opacity={mapOpacity}
+        />
+      )}
 
       {tracks.map((t) => (
         <Polyline

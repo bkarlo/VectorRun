@@ -359,6 +359,10 @@ export default function SetupWizard(props: Props) {
                 tracks={tracks}
                 selectedSequence={controls[selectedControl]?.sequence}
                 onPlace={placeControlAtGps}
+                mapUrl={mapUrl}
+                mapWidth={mapSize.w}
+                mapHeight={mapSize.h}
+                georef={georef}
               />
             ) : (
               <div className="flex items-center justify-center h-[420px] text-forest-600 px-6 text-center">
@@ -431,9 +435,9 @@ export default function SetupWizard(props: Props) {
               <div className="panel rounded-xl p-4 space-y-3">
                 <h3 className="font-display text-lg">Course controls</h3>
                 <p className="text-sm text-forest-600">
-                  Select a control, click the OSM map (tracks shown). Green =
-                  all tracks touch it; amber = none do. Saved controls reload
-                  automatically.
+                  Select a control, click OSM to place it. Tracks and the
+                  georeferenced map stay visible. Green = all tracks touch;
+                  amber = none do.
                 </p>
                 <ControlList
                   controls={controls}
