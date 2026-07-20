@@ -57,8 +57,14 @@ export default function SessionWorkspace({
   const [legIndex, setLegIndex] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [replayMs, setReplayMs] = useState(0);
+  const [playbackSpeed, setPlaybackSpeed] = useState(4);
   const [uploadStatus, setUploadStatus] = useState("");
+  const [mobileTab, setMobileTab] = useState<"map" | "runners" | "splits">(
+    "map"
+  );
+  const [mapFullscreen, setMapFullscreen] = useState(false);
   const playRef = useRef<number | null>(null);
+  const PLAYBACK_SPEEDS = [1, 2, 4, 8, 16] as const;
 
   const referenceId =
     analysis.referenceId ??
@@ -143,7 +149,7 @@ export default function SessionWorkspace({
       const dt = now - last;
       last = now;
       setReplayMs((t) => {
-        const next = t + dt * 4;
+        const next = t + dt * playbackSpeed;
         if (next >= timeRange.max) {
           setPlaying(false);
           return timeRange.max;
@@ -156,7 +162,21 @@ export default function SessionWorkspace({
     return () => {
       if (playRef.current) cancelAnimationFrame(playRef.current);
     };
-  }, [playing, timeRange.max]);
+  }, [playing, timeRange.max, playbackSpeed]);
+
+  useEffect(() => {
+    if (!mapFullscreen) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMapFullscreen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      document.body.style.overflow = prev;
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [mapFullscreen]);
 
   const bounds = useMemo(() => {
     if (affine && map) {
@@ -227,27 +247,68 @@ export default function SessionWorkspace({
 
   return (
     <div className="h-[100dvh] flex flex-col">
-      <header className="shrink-0 border-b border-forest-200 bg-white/80 backdrop-blur px-4 py-2 flex items-center gap-4 justify-between">
-        <div className="flex items-center gap-3 min-w-0">
+      <header
+        className={`shrink-0 border-b border-forest-200 bg-white/80 backdrop-blur px-3 sm:px-4 py-2 flex items-center gap-3 justify-between ${
+          mapFullscreen ? "hidden" : ""
+        }`}
+      >
+        <div className="flex items-center gap-2 sm:gap-3 min-w-0">
           <Link
             href="/"
-            className="font-display text-lg text-forest-900 shrink-0"
+            className="font-display text-base sm:text-lg text-forest-900 shrink-0"
           >
             VectorRun
           </Link>
-          <span className="text-forest-300">/</span>
-          <h1 className="truncate font-medium text-forest-800">{event.name}</h1>
+          <span className="text-forest-300 hidden sm:inline">/</span>
+          <h1 className="truncate font-medium text-forest-800 text-sm sm:text-base">
+            {event.name}
+          </h1>
         </div>
         <Link
           href={`/events/${event.id}/setup`}
-          className="text-sm px-3 py-1.5 rounded-lg border border-forest-200 hover:bg-forest-50"
+          className="text-sm px-2.5 sm:px-3 py-1.5 rounded-lg border border-forest-200 hover:bg-forest-50 shrink-0"
         >
           Setup
         </Link>
       </header>
 
-      <div className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-[380px_1fr_300px]">
-        <aside className="border-r border-forest-200 bg-white/70 overflow-auto p-3 space-y-3">
+      {/* Mobile tabs */}
+      <nav
+        className={`lg:hidden shrink-0 flex border-b border-forest-200 bg-white ${
+          mapFullscreen ? "hidden" : ""
+        }`}
+      >
+        {(
+          [
+            ["map", "Map"],
+            ["runners", "Runners"],
+            ["splits", "Splits"],
+          ] as const
+        ).map(([id, label]) => (
+          <button
+            key={id}
+            type="button"
+            onClick={() => setMobileTab(id)}
+            className={`flex-1 py-2.5 text-sm font-medium ${
+              mobileTab === id
+                ? "text-forest-800 border-b-2 border-forest-700"
+                : "text-forest-500"
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+      </nav>
+
+      {!mapFullscreen && (
+      <div
+        className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-[minmax(280px,380px)_1fr_minmax(240px,300px)]"
+      >
+        <aside
+          className={`border-r border-forest-200 bg-white/70 overflow-auto p-3 space-y-3 ${
+            mobileTab === "runners" ? "flex flex-col" : "hidden"
+          } lg:flex lg:flex-col`}
+        >
           <h2 className="text-xs font-semibold uppercase tracking-wider text-forest-600">
             Runners
           </h2>
@@ -498,8 +559,12 @@ export default function SessionWorkspace({
           )}
         </aside>
 
-        <div className="relative min-h-[320px] flex flex-col">
-          <div className="flex-1 min-h-0">
+        <div
+          className={`relative min-h-0 flex-col ${
+            mobileTab === "map" ? "flex min-h-[50dvh]" : "hidden"
+          } lg:flex`}
+        >
+          <div className="relative flex-1 min-h-[40dvh] lg:min-h-0">
             <SessionMap
               bounds={bounds}
               mapUrl={map ? `/api/maps/${event.id}` : null}
@@ -523,11 +588,20 @@ export default function SessionWorkspace({
                   ? { fromSeq: currentLeg.fromSeq, toSeq: currentLeg.toSeq }
                   : null
               }
+              resizeToken={`${mobileTab}-${mapFullscreen}`}
             />
+            <button
+              type="button"
+              onClick={() => setMapFullscreen(true)}
+              className="absolute top-3 right-3 z-[1000] rounded-lg bg-white/95 border border-forest-200 shadow px-2.5 py-1.5 text-xs font-medium text-forest-800 hover:bg-forest-50"
+              title="Fullscreen map"
+            >
+              Fullscreen
+            </button>
           </div>
 
-          <div className="shrink-0 border-t border-forest-200 bg-white/90 px-4 py-3 space-y-2">
-            <div className="flex items-center gap-3 flex-wrap">
+          <div className="shrink-0 border-t border-forest-200 bg-white/90 px-3 sm:px-4 py-2.5 sm:py-3 space-y-2">
+            <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
               <button
                 type="button"
                 onClick={() => setPlaying((p) => !p)}
@@ -535,14 +609,31 @@ export default function SessionWorkspace({
               >
                 {playing ? "Pause" : "Play"}
               </button>
+              <label className="flex items-center gap-1.5 text-sm text-forest-700">
+                <span className="text-[10px] uppercase tracking-wide text-forest-500 hidden sm:inline">
+                  Speed
+                </span>
+                <select
+                  value={playbackSpeed}
+                  onChange={(e) => setPlaybackSpeed(Number(e.target.value))}
+                  className="rounded-lg border border-forest-200 bg-white px-2 py-1.5 text-sm font-mono"
+                  aria-label="Playback speed"
+                >
+                  {PLAYBACK_SPEEDS.map((s) => (
+                    <option key={s} value={s}>
+                      {s}×
+                    </option>
+                  ))}
+                </select>
+              </label>
               <span className="font-mono text-sm text-forest-800 tabular-nums">
                 {formatSplitTime(relMs)}
                 <span className="text-forest-400"> / </span>
                 {formatSplitTime(duration)}
               </span>
               {refWallTime != null && (
-                <span className="text-xs text-forest-500 ml-auto font-mono">
-                  Ref start {formatWallTime(refWallTime)}
+                <span className="text-[10px] sm:text-xs text-forest-500 ml-auto font-mono truncate max-w-[40vw] sm:max-w-none">
+                  Ref {formatWallTime(refWallTime)}
                 </span>
               )}
             </div>
@@ -558,27 +649,33 @@ export default function SessionWorkspace({
               }}
               className="w-full accent-forest-700"
             />
-            <SpeedChart
-              runners={syncedTracks
-                .filter((t) => selected[t.participant.id])
-                .map((t) => ({
-                  id: t.participant.id,
-                  name: t.participant.name,
-                  color: t.participant.color,
-                  points: t.syncedPoints,
-                }))}
-              timeMin={timeRange.min}
-              timeMax={timeRange.max}
-              replayMs={replayMs}
-              onSeek={(t) => {
-                setPlaying(false);
-                setReplayMs(t);
-              }}
-            />
+            <div className="hidden sm:block">
+              <SpeedChart
+                runners={syncedTracks
+                  .filter((t) => selected[t.participant.id])
+                  .map((t) => ({
+                    id: t.participant.id,
+                    name: t.participant.name,
+                    color: t.participant.color,
+                    points: t.syncedPoints,
+                  }))}
+                timeMin={timeRange.min}
+                timeMax={timeRange.max}
+                replayMs={replayMs}
+                onSeek={(t) => {
+                  setPlaying(false);
+                  setReplayMs(t);
+                }}
+              />
+            </div>
           </div>
         </div>
 
-        <aside className="border-l border-forest-200 bg-white/70 overflow-auto p-3 space-y-3">
+        <aside
+          className={`border-l border-forest-200 bg-white/70 overflow-auto p-3 space-y-3 ${
+            mobileTab === "splits" ? "block" : "hidden"
+          } lg:block`}
+        >
           <h2 className="text-xs font-semibold uppercase tracking-wider text-forest-600">
             Leg analysis
           </h2>
@@ -651,6 +748,86 @@ export default function SessionWorkspace({
           )}
         </aside>
       </div>
+      )}
+
+      {mapFullscreen && (
+        <div className="fixed inset-0 z-[2000] bg-forest-950 flex flex-col">
+          <div className="relative flex-1 min-h-0">
+            <SessionMap
+              bounds={bounds}
+              mapUrl={map ? `/api/maps/${event.id}` : null}
+              mapImageBounds={
+                affine && map
+                  ? imageOverlayBounds(affine, map.width, map.height)
+                  : null
+              }
+              controls={controls}
+              tracks={syncedTracks
+                .filter((t) => selected[t.participant.id])
+                .map((t) => ({
+                  id: t.participant.id,
+                  name: t.participant.name,
+                  color: t.participant.color,
+                  points: t.syncedPoints,
+                }))}
+              replayMs={replayMs}
+              highlightLeg={
+                currentLeg
+                  ? { fromSeq: currentLeg.fromSeq, toSeq: currentLeg.toSeq }
+                  : null
+              }
+              resizeToken={`fs-${mapFullscreen}`}
+            />
+            <button
+              type="button"
+              onClick={() => setMapFullscreen(false)}
+              className="absolute top-3 right-3 z-[1000] rounded-lg bg-white shadow-lg px-3 py-2 text-sm font-medium text-forest-900"
+            >
+              Exit
+            </button>
+          </div>
+          <div className="shrink-0 bg-white px-3 py-3 space-y-2 safe-pb">
+            <div className="flex items-center gap-2 flex-wrap">
+              <button
+                type="button"
+                onClick={() => setPlaying((p) => !p)}
+                className="rounded-lg bg-forest-700 text-white px-3 py-2 text-sm font-medium min-w-[72px]"
+              >
+                {playing ? "Pause" : "Play"}
+              </button>
+              <select
+                value={playbackSpeed}
+                onChange={(e) => setPlaybackSpeed(Number(e.target.value))}
+                className="rounded-lg border border-forest-200 bg-white px-2 py-2 text-sm font-mono"
+                aria-label="Playback speed"
+              >
+                {PLAYBACK_SPEEDS.map((s) => (
+                  <option key={s} value={s}>
+                    {s}×
+                  </option>
+                ))}
+              </select>
+              <span className="font-mono text-sm text-forest-800 tabular-nums">
+                {formatSplitTime(relMs)}
+                <span className="text-forest-400"> / </span>
+                {formatSplitTime(duration)}
+              </span>
+            </div>
+            <input
+              type="range"
+              min={timeRange.min}
+              max={timeRange.max}
+              step={100}
+              value={replayMs}
+              onChange={(e) => {
+                setPlaying(false);
+                setReplayMs(Number(e.target.value));
+              }}
+              className="w-full accent-forest-700"
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -64,6 +64,8 @@ interface Props {
   tracks: TrackLayer[];
   replayMs: number;
   highlightLeg: { fromSeq: number; toSeq: number } | null;
+  /** Change to force Leaflet invalidateSize (tabs / fullscreen). */
+  resizeToken?: string | number;
 }
 
 function FitBounds({
@@ -75,6 +77,17 @@ function FitBounds({
   useEffect(() => {
     map.fitBounds(bounds, { padding: [24, 24] });
   }, [map, bounds]);
+  return null;
+}
+
+function InvalidateSize({ token }: { token?: string | number }) {
+  const map = useMap();
+  useEffect(() => {
+    const id = window.setTimeout(() => {
+      map.invalidateSize({ animate: false });
+    }, 50);
+    return () => window.clearTimeout(id);
+  }, [map, token]);
   return null;
 }
 
@@ -122,6 +135,7 @@ export default function SessionMap({
   tracks,
   replayMs,
   highlightLeg,
+  resizeToken,
 }: Props) {
   return (
     <MapContainer
@@ -139,6 +153,7 @@ export default function SessionMap({
         opacity={mapUrl && mapImageBounds ? 0.35 : 1}
       />
       <FitBounds bounds={bounds} />
+      <InvalidateSize token={resizeToken} />
 
       {mapUrl && mapImageBounds && (
         <ImageOverlay url={mapUrl} bounds={mapImageBounds} opacity={0.85} />

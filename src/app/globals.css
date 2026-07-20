@@ -44,3 +44,8 @@ body {
   background: #e3ebe0;
   font: inherit;
 }
+
+/* iOS safe area for fullscreen transport */
+.safe-pb {
+  padding-bottom: max(0.75rem, env(safe-area-inset-bottom));
+}
