@@ -2,7 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import SetupWizard from "@/components/SetupWizard";
 import { actionUpdateEventMeta } from "@/app/actions";
-import { getEvent, getMap, listControls } from "@/lib/events";
+import { getEvent, getMap, listControls, listSetupTracks } from "@/lib/events";
 import {
   EXERCISE_LABELS,
   type ExerciseType,
@@ -21,6 +21,7 @@ export default async function SetupPage({
   if (!event) notFound();
   const map = getMap(id);
   const controls = listControls(id);
+  const tracks = listSetupTracks(id);
   const georef: GeorefPair[] = map
     ? (JSON.parse(map.georef_json) as GeorefPair[])
     : [];
@@ -37,8 +38,8 @@ export default async function SetupPage({
               Setup · {event.name}
             </h1>
             <p className="text-sm text-forest-600 mt-1">
-              Map and georeference are optional. You can upload GPX tracks only
-              and work on OpenStreetMap.
+              Upload tracks first if you like — add the orienteering map later
+              and drag/scale it over OSM until it fits.
             </p>
           </div>
           <Link
@@ -104,6 +105,7 @@ export default async function SetupPage({
             map_x: c.map_x,
             map_y: c.map_y,
           }))}
+          tracks={tracks}
         />
       </div>
     </main>

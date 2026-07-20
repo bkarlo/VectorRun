@@ -568,11 +568,9 @@ export default function SessionWorkspace({
             <SessionMap
               bounds={bounds}
               mapUrl={map ? `/api/maps/${event.id}` : null}
-              mapImageBounds={
-                affine && map
-                  ? imageOverlayBounds(affine, map.width, map.height)
-                  : null
-              }
+              mapAffine={affine}
+              mapWidth={map?.width ?? 0}
+              mapHeight={map?.height ?? 0}
               controls={controls}
               tracks={syncedTracks
                 .filter((t) => selected[t.participant.id])
@@ -756,11 +754,9 @@ export default function SessionWorkspace({
             <SessionMap
               bounds={bounds}
               mapUrl={map ? `/api/maps/${event.id}` : null}
-              mapImageBounds={
-                affine && map
-                  ? imageOverlayBounds(affine, map.width, map.height)
-                  : null
-              }
+              mapAffine={affine}
+              mapWidth={map?.width ?? 0}
+              mapHeight={map?.height ?? 0}
               controls={controls}
               tracks={syncedTracks
                 .filter((t) => selected[t.participant.id])

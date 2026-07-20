@@ -451,3 +451,29 @@ export function getEventBundle(eventId: string) {
   if (!event) return null;
   return { event, map, controls, tracks, analysis };
 }
+
+function downsamplePoints(points: TrackPoint[], max = 600): TrackPoint[] {
+  if (points.length <= max) return points;
+  const step = Math.ceil(points.length / max);
+  const out: TrackPoint[] = [];
+  for (let i = 0; i < points.length; i += step) out.push(points[i]);
+  const last = points[points.length - 1];
+  if (out[out.length - 1] !== last) out.push(last);
+  return out;
+}
+
+/** Lightweight tracks for setup (overlay fit) — downsampled for the client. */
+export function listSetupTracks(eventId: string): {
+  id: string;
+  name: string;
+  color: string;
+  points: TrackPoint[];
+}[] {
+  return listParticipants(eventId).flatMap((p) => {
+    const track = getTrackForParticipant(p.id);
+    if (!track) return [];
+    const points = downsamplePoints(loadTrackPoints(track));
+    if (points.length === 0) return [];
+    return [{ id: p.id, name: p.name, color: p.color, points }];
+  });
+}

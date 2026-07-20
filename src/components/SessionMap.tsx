@@ -1,9 +1,8 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useMemo } from "react";
 import {
   CircleMarker,
-  ImageOverlay,
   MapContainer,
   Marker,
   Polyline,
@@ -13,8 +12,10 @@ import {
 } from "react-leaflet";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
-import type { ControlRow, TrackPoint } from "@/lib/types";
+import type { AffineTransform, ControlRow, TrackPoint } from "@/lib/types";
+import { mapToGps } from "@/lib/georef";
 import { interpolateAtTime } from "@/lib/gpx";
+import RotatedImageOverlay from "./RotatedImageOverlay";
 
 function runnerInitials(name: string): string {
   const parts = name.trim().split(/\s+/).filter(Boolean);
@@ -59,12 +60,13 @@ interface TrackLayer {
 interface Props {
   bounds: [[number, number], [number, number]];
   mapUrl: string | null;
-  mapImageBounds: [[number, number], [number, number]] | null;
+  mapAffine: AffineTransform | null;
+  mapWidth: number;
+  mapHeight: number;
   controls: ControlRow[];
   tracks: TrackLayer[];
   replayMs: number;
   highlightLeg: { fromSeq: number; toSeq: number } | null;
-  /** Change to force Leaflet invalidateSize (tabs / fullscreen). */
   resizeToken?: string | number;
 }
 
@@ -130,13 +132,29 @@ function TrackGroup({
 export default function SessionMap({
   bounds,
   mapUrl,
-  mapImageBounds,
+  mapAffine,
+  mapWidth,
+  mapHeight,
   controls,
   tracks,
   replayMs,
   highlightLeg,
   resizeToken,
 }: Props) {
+  const corners = useMemo(() => {
+    if (!mapAffine || mapWidth <= 0 || mapHeight <= 0) return null;
+    const tl = mapToGps(mapAffine, { x: 0, y: 0 });
+    const tr = mapToGps(mapAffine, { x: mapWidth, y: 0 });
+    const bl = mapToGps(mapAffine, { x: 0, y: mapHeight });
+    return {
+      topLeft: [tl.lat, tl.lon] as [number, number],
+      topRight: [tr.lat, tr.lon] as [number, number],
+      bottomLeft: [bl.lat, bl.lon] as [number, number],
+    };
+  }, [mapAffine, mapWidth, mapHeight]);
+
+  const hasMap = !!(mapUrl && corners);
+
   return (
     <MapContainer
       center={[
@@ -150,13 +168,19 @@ export default function SessionMap({
       <TileLayer
         attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a>'
         url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-        opacity={mapUrl && mapImageBounds ? 0.35 : 1}
+        opacity={hasMap ? 0.4 : 1}
       />
       <FitBounds bounds={bounds} />
       <InvalidateSize token={resizeToken} />
 
-      {mapUrl && mapImageBounds && (
-        <ImageOverlay url={mapUrl} bounds={mapImageBounds} opacity={0.85} />
+      {hasMap && mapUrl && corners && (
+        <RotatedImageOverlay
+          url={mapUrl}
+          topLeft={corners.topLeft}
+          topRight={corners.topRight}
+          bottomLeft={corners.bottomLeft}
+          opacity={0.55}
+        />
       )}
 
       {controls

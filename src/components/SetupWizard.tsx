@@ -3,11 +3,12 @@
 import { useCallback, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import Link from "next/link";
-import type { GeorefPair } from "@/lib/types";
+import type { GeorefPair, TrackPoint } from "@/lib/types";
 import { actionSaveGeoref, actionSaveControls } from "@/app/actions";
 import { fitAffine, mapToGps } from "@/lib/georef";
 
 const GpsControlMap = dynamic(() => import("./GpsControlMap"), { ssr: false });
+const MapOverlayFit = dynamic(() => import("./MapOverlayFit"), { ssr: false });
 
 interface ControlDraft {
   code: string;
@@ -16,6 +17,13 @@ interface ControlDraft {
   lon: number | null;
   map_x: number | null;
   map_y: number | null;
+}
+
+export interface SetupTrack {
+  id: string;
+  name: string;
+  color: string;
+  points: TrackPoint[];
 }
 
 interface Props {
@@ -27,9 +35,10 @@ interface Props {
   mapHeight: number;
   initialGeoref: GeorefPair[];
   initialControls: ControlDraft[];
+  tracks: SetupTrack[];
 }
 
-type Mode = "georef" | "controls";
+type Mode = "place" | "points" | "controls";
 
 const defaultControls = (): ControlDraft[] => [
   { code: "S", sequence: 0, lat: null, lon: null, map_x: null, map_y: null },
@@ -46,8 +55,11 @@ export default function SetupWizard(props: Props) {
     w: props.mapWidth || 0,
     h: props.mapHeight || 0,
   });
-  // Without a map image, start on controls (GPS / OSM). Georef only after map upload.
-  const [mode, setMode] = useState<Mode>(mapUrl ? "georef" : "controls");
+  const [tracks] = useState(props.tracks);
+  const [mode, setMode] = useState<Mode>(() => {
+    if (mapUrl) return "place";
+    return "controls";
+  });
   const [georef, setGeoref] = useState<GeorefPair[]>(props.initialGeoref);
   const [controls, setControls] = useState<ControlDraft[]>(
     props.initialControls.length ? props.initialControls : defaultControls()
@@ -80,8 +92,12 @@ export default function SetupWizard(props: Props) {
     }
     setMapSize({ w: img.naturalWidth, h: img.naturalHeight });
     setMapUrl(`/api/maps/${props.eventId}?t=${Date.now()}`);
-    setMode("georef");
-    setStatus("Map uploaded — add ≥3 georef points");
+    setMode("place");
+    setStatus(
+      tracks.length
+        ? "Map uploaded — drag/scale over tracks until it fits"
+        : "Map uploaded — upload GPX tracks, then place the map over them"
+    );
   };
 
   const onUploadGpx = async (files: FileList | null) => {
@@ -99,7 +115,9 @@ export default function SetupWizard(props: Props) {
         return;
       }
     }
-    setGpxStatus(`Uploaded ${files.length} file(s). Open session to replay.`);
+    setGpxStatus(`Uploaded ${files.length} file(s). Reloading tracks…`);
+    // Soft refresh so overlay sees new tracks
+    window.location.reload();
   };
 
   const clickToMapPx = useCallback(
@@ -131,7 +149,7 @@ export default function SetupWizard(props: Props) {
     const px = clickToMapPx(e);
     if (!px) return;
 
-    if (mode === "georef") {
+    if (mode === "points") {
       const lat = parseFloat(pendingGps.lat);
       const lon = parseFloat(pendingGps.lon);
       if (Number.isNaN(lat) || Number.isNaN(lon)) {
@@ -142,7 +160,7 @@ export default function SetupWizard(props: Props) {
       setGeoref(next);
       setPendingGps({ lat: "", lon: "" });
       setStatus(`Georef point ${next.length} added`);
-    } else {
+    } else if (mode === "controls") {
       const transform = fitAffine(georef);
       const gps = transform ? mapToGps(transform, px) : null;
       setControls((prev) =>
@@ -161,9 +179,15 @@ export default function SetupWizard(props: Props) {
       setStatus(
         gps
           ? `Control ${controls[selectedControl]?.code} placed (GPS derived)`
-          : `Control ${controls[selectedControl]?.code} placed — enter GPS or add georef`
+          : `Control ${controls[selectedControl]?.code} placed — enter GPS or place map first`
       );
     }
+  };
+
+  const saveOverlayGeoref = async (pairs: GeorefPair[]) => {
+    setGeoref(pairs);
+    await actionSaveGeoref(props.eventId, pairs);
+    setStatus(`Saved map placement (${pairs.length} corners)`);
   };
 
   const saveGeoref = async () => {
@@ -187,14 +211,13 @@ export default function SetupWizard(props: Props) {
 
   return (
     <div className="space-y-6">
-      {/* GPX-first path */}
       <div className="panel rounded-xl p-4 border-forest-300 bg-forest-50/80">
         <h3 className="font-display text-lg text-forest-900 mb-1">
-          GPS-only (no map image)
+          Tracks first, map later
         </h3>
         <p className="text-sm text-forest-600 mb-3">
-          Skip the orienteering map and georeference. Upload GPX tracks and
-          optionally place controls on OpenStreetMap for leg splits.
+          Upload GPX anytime. When you add a map image, place it over the OSM
+          layer (move / scale at ~50% opacity) until it matches the tracks.
         </p>
         <div className="flex flex-wrap gap-2 items-center">
           <label className="rounded-lg bg-forest-700 text-white px-4 py-2 cursor-pointer hover:bg-forest-800 text-sm font-medium">
@@ -207,12 +230,29 @@ export default function SetupWizard(props: Props) {
               onChange={(e) => void onUploadGpx(e.target.files)}
             />
           </label>
+          <label className="rounded-lg border border-forest-300 bg-white px-4 py-2 cursor-pointer hover:bg-forest-50 text-sm font-medium">
+            {mapUrl ? "Replace map image" : "Upload map image"}
+            <input
+              type="file"
+              accept="image/*"
+              className="hidden"
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) void onUploadMap(f);
+              }}
+            />
+          </label>
           <Link
             href={`/events/${props.eventId}`}
             className="rounded-lg border border-forest-300 bg-white px-4 py-2 text-sm font-medium hover:bg-forest-50"
           >
             Open session →
           </Link>
+          {tracks.length > 0 && (
+            <span className="text-sm text-forest-600 font-mono">
+              {tracks.length} track(s)
+            </span>
+          )}
           {gpxStatus && (
             <span className="text-sm text-forest-600 font-mono">{gpxStatus}</span>
           )}
@@ -220,29 +260,28 @@ export default function SetupWizard(props: Props) {
       </div>
 
       <div className="flex flex-wrap gap-2 items-center">
-        <label className="rounded-lg border border-forest-300 bg-white px-4 py-2 cursor-pointer hover:bg-forest-50 text-sm font-medium">
-          {mapUrl ? "Replace map image" : "Optional: upload map image"}
-          <input
-            type="file"
-            accept="image/*"
-            className="hidden"
-            onChange={(e) => {
-              const f = e.target.files?.[0];
-              if (f) void onUploadMap(f);
-            }}
-          />
-        </label>
         <div className="flex rounded-lg border border-forest-200 overflow-hidden text-sm">
           <button
             type="button"
             disabled={!mapUrl}
             className={`px-3 py-2 disabled:opacity-40 ${
-              mode === "georef" ? "bg-forest-100 font-medium" : "bg-white"
+              mode === "place" ? "bg-forest-100 font-medium" : "bg-white"
             }`}
-            onClick={() => setMode("georef")}
+            onClick={() => setMode("place")}
             title={!mapUrl ? "Upload a map image first" : undefined}
           >
-            Georeference
+            Place map
+          </button>
+          <button
+            type="button"
+            disabled={!mapUrl}
+            className={`px-3 py-2 disabled:opacity-40 ${
+              mode === "points" ? "bg-forest-100 font-medium" : "bg-white"
+            }`}
+            onClick={() => setMode("points")}
+            title="Advanced: click lat/lon pairs"
+          >
+            Point georef
           </button>
           <button
             type="button"
@@ -259,149 +298,190 @@ export default function SetupWizard(props: Props) {
         )}
       </div>
 
-      <div className="grid lg:grid-cols-[1fr_320px] gap-6">
-        <div className="panel rounded-xl overflow-hidden relative min-h-[420px] bg-forest-100">
-          {mapUrl ? (
-            <>
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                ref={imgRef}
-                src={mapUrl}
-                alt="Orienteering map"
-                className="w-full h-auto cursor-crosshair select-none"
-                onClick={onImageClick}
-                draggable={false}
-              />
-              {mapSize.w > 0 && imgRef.current && (
-                <MapMarkers
-                  georef={georef}
-                  controls={controls}
-                  mode={mode}
-                  mapW={mapSize.w}
-                  mapH={mapSize.h}
-                  img={imgRef.current}
-                />
-              )}
-            </>
-          ) : mode === "controls" ? (
-            <GpsControlMap
-              controls={placedGpsControls}
-              onPlace={placeControlAtGps}
-            />
-          ) : (
-            <div className="flex items-center justify-center h-[420px] text-forest-600 px-6 text-center">
-              Upload a map image to georeference, or stay on Controls and place
-              points on OpenStreetMap / upload GPX above.
-            </div>
+      {mode === "place" && mapUrl && mapSize.w > 0 ? (
+        <div className="panel rounded-xl p-4">
+          <MapOverlayFit
+            key={mapUrl}
+            mapUrl={mapUrl}
+            mapWidth={mapSize.w}
+            mapHeight={mapSize.h}
+            tracks={tracks}
+            initialGeoref={georef}
+            onSave={saveOverlayGeoref}
+          />
+          {tracks.length === 0 && (
+            <p className="text-sm text-amber-800 mt-3 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+              No tracks yet — upload GPX above so you can align the map to
+              runners. You can still place and save a rough position.
+            </p>
           )}
         </div>
-
-        <aside className="space-y-4">
-          {mode === "georef" && mapUrl ? (
-            <div className="panel rounded-xl p-4 space-y-3">
-              <h3 className="font-display text-lg">Georeference points</h3>
-              <p className="text-sm text-forest-600">
-                Enter GPS for a known location, then click the matching spot on
-                the map. Need at least 3 points.
-              </p>
-              <div className="grid grid-cols-2 gap-2">
-                <label className="text-xs">
-                  Latitude
-                  <input
-                    className="mt-1 w-full rounded border border-forest-200 px-2 py-1.5"
-                    value={pendingGps.lat}
-                    onChange={(e) =>
-                      setPendingGps((p) => ({ ...p, lat: e.target.value }))
-                    }
-                    placeholder="59.3312"
+      ) : (
+        <div className="grid lg:grid-cols-[1fr_320px] gap-6">
+          <div className="panel rounded-xl overflow-hidden relative min-h-[420px] bg-forest-100">
+            {mode === "points" && mapUrl ? (
+              <>
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  ref={imgRef}
+                  src={mapUrl}
+                  alt="Orienteering map"
+                  className="w-full h-auto cursor-crosshair select-none"
+                  onClick={onImageClick}
+                  draggable={false}
+                />
+                {mapSize.w > 0 && imgRef.current && (
+                  <MapMarkers
+                    georef={georef}
+                    controls={controls}
+                    mode={mode}
+                    mapW={mapSize.w}
+                    mapH={mapSize.h}
+                    img={imgRef.current}
                   />
-                </label>
-                <label className="text-xs">
-                  Longitude
-                  <input
-                    className="mt-1 w-full rounded border border-forest-200 px-2 py-1.5"
-                    value={pendingGps.lon}
-                    onChange={(e) =>
-                      setPendingGps((p) => ({ ...p, lon: e.target.value }))
-                    }
-                    placeholder="18.0649"
+                )}
+              </>
+            ) : mode === "controls" && mapUrl ? (
+              <>
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  ref={imgRef}
+                  src={mapUrl}
+                  alt="Orienteering map"
+                  className="w-full h-auto cursor-crosshair select-none"
+                  onClick={onImageClick}
+                  draggable={false}
+                />
+                {mapSize.w > 0 && imgRef.current && (
+                  <MapMarkers
+                    georef={georef}
+                    controls={controls}
+                    mode={mode}
+                    mapW={mapSize.w}
+                    mapH={mapSize.h}
+                    img={imgRef.current}
                   />
-                </label>
-              </div>
-              <ul className="text-sm space-y-1 max-h-40 overflow-auto font-mono">
-                {georef.map((g, i) => (
-                  <li key={i} className="flex justify-between gap-2">
-                    <span>
-                      #{i + 1} ({g.map.x.toFixed(0)},{g.map.y.toFixed(0)}) →{" "}
-                      {g.gps.lat.toFixed(5)},{g.gps.lon.toFixed(5)}
-                    </span>
-                    <button
-                      type="button"
-                      className="text-red-600"
-                      onClick={() =>
-                        setGeoref((prev) => prev.filter((_, j) => j !== i))
-                      }
-                    >
-                      ×
-                    </button>
-                  </li>
-                ))}
-              </ul>
-              <button
-                type="button"
-                onClick={() => void saveGeoref()}
-                disabled={georef.length < 3}
-                className="w-full rounded-lg bg-forest-700 text-white py-2 disabled:opacity-40"
-              >
-                Save georef ({georef.length}/3+)
-              </button>
-            </div>
-          ) : (
-            <div className="panel rounded-xl p-4 space-y-3">
-              <h3 className="font-display text-lg">Course controls</h3>
-              <p className="text-sm text-forest-600">
-                {mapUrl
-                  ? "Select a control, click the map image to place it."
-                  : "Select a control, click the OSM map to set GPS. Optional — skip and use GPX overlay only."}
-              </p>
-              <ControlList
-                controls={controls}
-                selectedControl={selectedControl}
-                setSelectedControl={setSelectedControl}
-                setControls={setControls}
+                )}
+              </>
+            ) : mode === "controls" ? (
+              <GpsControlMap
+                controls={placedGpsControls}
+                onPlace={placeControlAtGps}
               />
-              <div className="flex gap-2">
+            ) : (
+              <div className="flex items-center justify-center h-[420px] text-forest-600 px-6 text-center">
+                Upload a map image to place it over OSM, or stay on Controls.
+              </div>
+            )}
+          </div>
+
+          <aside className="space-y-4">
+            {mode === "points" && mapUrl ? (
+              <div className="panel rounded-xl p-4 space-y-3">
+                <h3 className="font-display text-lg">Point georeference</h3>
+                <p className="text-sm text-forest-600">
+                  Advanced fallback: enter GPS, click the matching spot on the
+                  map image. Prefer <em>Place map</em> when you have tracks.
+                </p>
+                <div className="grid grid-cols-2 gap-2">
+                  <label className="text-xs">
+                    Latitude
+                    <input
+                      className="mt-1 w-full rounded border border-forest-200 px-2 py-1.5"
+                      value={pendingGps.lat}
+                      onChange={(e) =>
+                        setPendingGps((p) => ({ ...p, lat: e.target.value }))
+                      }
+                      placeholder="59.3312"
+                    />
+                  </label>
+                  <label className="text-xs">
+                    Longitude
+                    <input
+                      className="mt-1 w-full rounded border border-forest-200 px-2 py-1.5"
+                      value={pendingGps.lon}
+                      onChange={(e) =>
+                        setPendingGps((p) => ({ ...p, lon: e.target.value }))
+                      }
+                      placeholder="18.0649"
+                    />
+                  </label>
+                </div>
+                <ul className="text-sm space-y-1 max-h-40 overflow-auto font-mono">
+                  {georef.map((g, i) => (
+                    <li key={i} className="flex justify-between gap-2">
+                      <span>
+                        #{i + 1} ({g.map.x.toFixed(0)},{g.map.y.toFixed(0)}) →{" "}
+                        {g.gps.lat.toFixed(5)},{g.gps.lon.toFixed(5)}
+                      </span>
+                      <button
+                        type="button"
+                        className="text-red-600"
+                        onClick={() =>
+                          setGeoref((prev) => prev.filter((_, j) => j !== i))
+                        }
+                      >
+                        ×
+                      </button>
+                    </li>
+                  ))}
+                </ul>
                 <button
                   type="button"
-                  className="flex-1 rounded-lg border border-forest-200 py-2 text-sm"
-                  onClick={() =>
-                    setControls((prev) => [
-                      ...prev,
-                      {
-                        code: String(prev.length),
-                        sequence: prev.length,
-                        lat: null,
-                        lon: null,
-                        map_x: null,
-                        map_y: null,
-                      },
-                    ])
-                  }
+                  onClick={() => void saveGeoref()}
+                  disabled={georef.length < 3}
+                  className="w-full rounded-lg bg-forest-700 text-white py-2 disabled:opacity-40"
                 >
-                  Add control
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void saveControls()}
-                  className="flex-1 rounded-lg bg-forest-700 text-white py-2 text-sm"
-                >
-                  Save controls
+                  Save georef ({georef.length}/3+)
                 </button>
               </div>
-            </div>
-          )}
-        </aside>
-      </div>
+            ) : (
+              <div className="panel rounded-xl p-4 space-y-3">
+                <h3 className="font-display text-lg">Course controls</h3>
+                <p className="text-sm text-forest-600">
+                  {mapUrl
+                    ? "Select a control, click the map image to place it."
+                    : "Select a control, click the OSM map to set GPS."}
+                </p>
+                <ControlList
+                  controls={controls}
+                  selectedControl={selectedControl}
+                  setSelectedControl={setSelectedControl}
+                  setControls={setControls}
+                />
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    className="flex-1 rounded-lg border border-forest-200 py-2 text-sm"
+                    onClick={() =>
+                      setControls((prev) => [
+                        ...prev,
+                        {
+                          code: String(prev.length),
+                          sequence: prev.length,
+                          lat: null,
+                          lon: null,
+                          map_x: null,
+                          map_y: null,
+                        },
+                      ])
+                    }
+                  >
+                    Add control
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void saveControls()}
+                    className="flex-1 rounded-lg bg-forest-700 text-white py-2 text-sm"
+                  >
+                    Save controls
+                  </button>
+                </div>
+              </div>
+            )}
+          </aside>
+        </div>
+      )}
     </div>
   );
 }
@@ -539,7 +619,7 @@ function MapMarkers({
   const offsetY = rect.top - parent.top;
 
   const dots =
-    mode === "georef"
+    mode === "points"
       ? georef.map((g, i) => ({
           key: `g${i}`,
           x: g.map.x,
