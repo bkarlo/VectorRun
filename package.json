@@ -1,0 +1,37 @@
+{
+  "name": "vectorrun",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start --hostname 0.0.0.0 --port ${PORT:-3000}",
+    "lint": "next lint",
+    "seed": "tsx scripts/seed-demo.ts"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.8.1",
+    "leaflet": "^1.9.4",
+    "next": "^16.2.10",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-leaflet": "^5.0.0",
+    "uuid": "^11.1.0"
+  },
+  "devDependencies": {
+    "@eslint/eslintrc": "^3.3.6",
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/leaflet": "^1.9.16",
+    "@types/node": "^22.13.10",
+    "@types/react": "^19.0.10",
+    "@types/react-dom": "^19.0.4",
+    "@types/uuid": "^10.0.0",
+    "autoprefixer": "^10.4.21",
+    "eslint": "^9.22.0",
+    "eslint-config-next": "^15.5.20",
+    "postcss": "^8.5.3",
+    "tailwindcss": "^3.4.17",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2"
+  }
+}

@@ -1,0 +1,46 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg: #f3f6f2;
+  --ink: #121c11;
+  --panel: #ffffff;
+  --line: #c5d6bf;
+  --accent: #547b49;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  background:
+    radial-gradient(ellipse 80% 50% at 10% -10%, #dce8d4 0%, transparent 55%),
+    radial-gradient(ellipse 60% 40% at 100% 0%, #e8dfd0 0%, transparent 50%),
+    var(--bg);
+  color: var(--ink);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+@layer utilities {
+  .panel {
+    @apply bg-white/90 border border-forest-200 shadow-sm backdrop-blur-sm;
+  }
+}
+
+/* Runner playhead avatars — Leaflet adds default marker chrome otherwise */
+.runner-avatar-icon {
+  background: transparent !important;
+  border: none !important;
+}
+
+/* Leaflet overrides inside our workspace */
+.leaflet-container {
+  background: #e3ebe0;
+  font: inherit;
+}
