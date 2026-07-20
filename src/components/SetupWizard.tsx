@@ -1,11 +1,11 @@
 "use client";
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import Link from "next/link";
 import type { GeorefPair, TrackPoint } from "@/lib/types";
 import { actionSaveGeoref, actionSaveControls } from "@/app/actions";
-import { fitAffine, gpsToMap, mapToGps } from "@/lib/georef";
+import { fitAffine, gpsToMap } from "@/lib/georef";
 import { trackTouchesControl } from "@/lib/sync";
 
 const GpsControlMap = dynamic(() => import("./GpsControlMap"), { ssr: false });
@@ -41,13 +41,6 @@ interface Props {
 
 type Mode = "place" | "points" | "controls";
 
-const defaultControls = (): ControlDraft[] => [
-  { code: "S", sequence: 0, lat: null, lon: null, map_x: null, map_y: null },
-  { code: "1", sequence: 1, lat: null, lon: null, map_x: null, map_y: null },
-  { code: "2", sequence: 2, lat: null, lon: null, map_x: null, map_y: null },
-  { code: "F", sequence: 3, lat: null, lon: null, map_x: null, map_y: null },
-];
-
 export default function SetupWizard(props: Props) {
   const [mapUrl, setMapUrl] = useState(
     props.hasMap ? `/api/maps/${props.eventId}?t=${Date.now()}` : null
@@ -66,13 +59,23 @@ export default function SetupWizard(props: Props) {
   });
   const [georef, setGeoref] = useState<GeorefPair[]>(props.initialGeoref);
   const [controls, setControls] = useState<ControlDraft[]>(
-    props.initialControls.length ? props.initialControls : defaultControls()
+    props.initialControls
   );
   const [status, setStatus] = useState("");
   const [pendingGps, setPendingGps] = useState({ lat: "", lon: "" });
-  const [selectedControl, setSelectedControl] = useState(0);
+  const [focusCodeIndex, setFocusCodeIndex] = useState<number | null>(null);
   const [gpxStatus, setGpxStatus] = useState("");
   const imgRef = useRef<HTMLImageElement>(null);
+  const codeInputRefs = useRef<(HTMLInputElement | null)[]>([]);
+
+  useEffect(() => {
+    if (focusCodeIndex == null) return;
+    const el = codeInputRefs.current[focusCodeIndex];
+    if (!el) return;
+    el.focus();
+    el.select();
+    setFocusCodeIndex(null);
+  }, [focusCodeIndex, controls.length]);
 
   const onUploadMap = async (file: File) => {
     setStatus("Uploading map…");
@@ -139,22 +142,26 @@ export default function SetupWizard(props: Props) {
   const placeControlAtGps = (lat: number, lon: number) => {
     const transform = fitAffine(georef);
     const mapPx = transform ? gpsToMap(transform, { lat, lon }) : null;
-    setControls((prev) =>
-      prev.map((c, i) =>
-        i === selectedControl
-          ? {
-              ...c,
-              lat,
-              lon,
-              map_x: mapPx?.x ?? c.map_x,
-              map_y: mapPx?.y ?? c.map_y,
-            }
-          : c
-      )
-    );
-    setStatus(
-      `Control ${controls[selectedControl]?.code} → ${lat.toFixed(5)}, ${lon.toFixed(5)}`
-    );
+    setControls((prev) => {
+      const sequence =
+        prev.length === 0
+          ? 0
+          : Math.max(...prev.map((c) => c.sequence), -1) + 1;
+      const list = [
+        ...prev,
+        {
+          code: "",
+          sequence,
+          lat,
+          lon,
+          map_x: mapPx?.x ?? null,
+          map_y: mapPx?.y ?? null,
+        },
+      ];
+      setFocusCodeIndex(list.length - 1);
+      setStatus(`Point #${list.length} placed — type its number`);
+      return list;
+    });
   };
 
   const onImageClick = (e: React.MouseEvent<HTMLImageElement>) => {
@@ -172,27 +179,6 @@ export default function SetupWizard(props: Props) {
       setGeoref(next);
       setPendingGps({ lat: "", lon: "" });
       setStatus(`Georef point ${next.length} added`);
-    } else if (mode === "controls") {
-      const transform = fitAffine(georef);
-      const gps = transform ? mapToGps(transform, px) : null;
-      setControls((prev) =>
-        prev.map((c, i) =>
-          i === selectedControl
-            ? {
-                ...c,
-                map_x: px.x,
-                map_y: px.y,
-                lat: gps?.lat ?? c.lat,
-                lon: gps?.lon ?? c.lon,
-              }
-            : c
-        )
-      );
-      setStatus(
-        gps
-          ? `Control ${controls[selectedControl]?.code} placed (GPS derived)`
-          : `Control ${controls[selectedControl]?.code} placed — enter GPS or place map first`
-      );
     }
   };
 
@@ -357,7 +343,6 @@ export default function SetupWizard(props: Props) {
               <GpsControlMap
                 controls={placedGpsControls}
                 tracks={tracks}
-                selectedSequence={controls[selectedControl]?.sequence}
                 onPlace={placeControlAtGps}
                 mapUrl={mapUrl}
                 mapWidth={mapSize.w}
@@ -388,7 +373,7 @@ export default function SetupWizard(props: Props) {
                       onChange={(e) =>
                         setPendingGps((p) => ({ ...p, lat: e.target.value }))
                       }
-                      placeholder="59.3312"
+                      placeholder="47.576"
                     />
                   </label>
                   <label className="text-xs">
@@ -399,7 +384,7 @@ export default function SetupWizard(props: Props) {
                       onChange={(e) =>
                         setPendingGps((p) => ({ ...p, lon: e.target.value }))
                       }
-                      placeholder="18.0649"
+                      placeholder="18.878"
                     />
                   </label>
                 </div>
@@ -435,41 +420,35 @@ export default function SetupWizard(props: Props) {
               <div className="panel rounded-xl p-4 space-y-3">
                 <h3 className="font-display text-lg">Course controls</h3>
                 <p className="text-sm text-forest-600">
-                  Select a control, click OSM to place it. Tracks and the
-                  georeferenced map stay visible. Green = all tracks touch;
-                  amber = none do.
+                  Click the map in course order (start → … → finish). After each
+                  click, type the control number. Green/amber shows track hits.
                 </p>
                 <ControlList
                   controls={controls}
-                  selectedControl={selectedControl}
-                  setSelectedControl={setSelectedControl}
                   setControls={setControls}
                   tracks={tracks}
+                  codeInputRefs={codeInputRefs}
                 />
                 <div className="flex gap-2">
                   <button
                     type="button"
                     className="flex-1 rounded-lg border border-forest-200 py-2 text-sm"
-                    onClick={() =>
-                      setControls((prev) => [
-                        ...prev,
-                        {
-                          code: String(prev.length),
-                          sequence: prev.length,
-                          lat: null,
-                          lon: null,
-                          map_x: null,
-                          map_y: null,
-                        },
-                      ])
-                    }
+                    onClick={() => {
+                      setControls([]);
+                      setStatus("Controls cleared — click map to place");
+                    }}
+                    disabled={controls.length === 0}
                   >
-                    Add control
+                    Clear all
                   </button>
                   <button
                     type="button"
                     onClick={() => void saveControls()}
-                    className="flex-1 rounded-lg bg-forest-700 text-white py-2 text-sm"
+                    disabled={
+                      controls.length === 0 ||
+                      controls.some((c) => !c.code.trim())
+                    }
+                    className="flex-1 rounded-lg bg-forest-700 text-white py-2 text-sm disabled:opacity-40"
                   >
                     Save controls
                   </button>
@@ -485,17 +464,23 @@ export default function SetupWizard(props: Props) {
 
 function ControlList({
   controls,
-  selectedControl,
-  setSelectedControl,
   setControls,
   tracks,
+  codeInputRefs,
 }: {
   controls: ControlDraft[];
-  selectedControl: number;
-  setSelectedControl: (i: number) => void;
   setControls: React.Dispatch<React.SetStateAction<ControlDraft[]>>;
   tracks: SetupTrack[];
+  codeInputRefs: React.MutableRefObject<(HTMLInputElement | null)[]>;
 }) {
+  if (controls.length === 0) {
+    return (
+      <p className="text-sm text-forest-500 italic">
+        No controls yet — click the map to add the first point.
+      </p>
+    );
+  }
+
   return (
     <ul className="space-y-2 max-h-[360px] overflow-auto">
       {controls.map((c, i) => {
@@ -514,130 +499,77 @@ function ControlList({
         const hitCount = touches.filter((t) => t.hit).length;
 
         return (
-        <li
-          key={i}
-          className={`rounded-lg border p-2 ${
-            selectedControl === i
-              ? "border-forest-500 bg-forest-50"
-              : "border-forest-200"
-          }`}
-        >
-          <button
-            type="button"
-            className="w-full text-left font-medium mb-1"
-            onClick={() => setSelectedControl(i)}
+          <li
+            key={`${c.sequence}-${i}`}
+            className="rounded-lg border border-forest-200 p-2 flex gap-2 items-start"
           >
-            {c.code}{" "}
-            <span className="text-xs text-forest-500">seq {c.sequence}</span>
-            {touches.length > 0 && (
-              <span
-                className={`ml-2 text-[10px] font-mono ${
-                  hitCount === touches.length
-                    ? "text-green-700"
-                    : hitCount === 0
-                      ? "text-amber-700"
-                      : "text-forest-600"
-                }`}
-              >
-                tracks {hitCount}/{touches.length}
-              </span>
-            )}
-          </button>
-          <div className="grid grid-cols-2 gap-1">
-            <input
-              className="rounded border border-forest-200 px-1.5 py-1 text-xs"
-              placeholder="code"
-              value={c.code}
-              onChange={(e) =>
-                setControls((prev) =>
-                  prev.map((x, j) =>
-                    j === i ? { ...x, code: e.target.value } : x
+            <span className="text-xs text-forest-400 font-mono pt-2 w-5 shrink-0">
+              {i + 1}.
+            </span>
+            <div className="flex-1 min-w-0 space-y-1">
+              <input
+                ref={(el) => {
+                  codeInputRefs.current[i] = el;
+                }}
+                className="w-full rounded border border-forest-200 px-2 py-1.5 text-sm font-medium"
+                placeholder="Control number (e.g. S, 31, F)"
+                value={c.code}
+                onChange={(e) =>
+                  setControls((prev) =>
+                    prev.map((x, j) =>
+                      j === i ? { ...x, code: e.target.value } : x
+                    )
                   )
-                )
-              }
-            />
-            <input
-              className="rounded border border-forest-200 px-1.5 py-1 text-xs"
-              type="number"
-              value={c.sequence}
-              onChange={(e) =>
-                setControls((prev) =>
-                  prev.map((x, j) =>
-                    j === i
-                      ? { ...x, sequence: Number(e.target.value) }
-                      : x
-                  )
-                )
-              }
-            />
-            <input
-              className="rounded border border-forest-200 px-1.5 py-1 text-xs"
-              placeholder="lat"
-              value={c.lat ?? ""}
-              onChange={(e) =>
-                setControls((prev) =>
-                  prev.map((x, j) =>
-                    j === i
-                      ? {
-                          ...x,
-                          lat: e.target.value
-                            ? parseFloat(e.target.value)
-                            : null,
-                        }
-                      : x
-                  )
-                )
-              }
-            />
-            <input
-              className="rounded border border-forest-200 px-1.5 py-1 text-xs"
-              placeholder="lon"
-              value={c.lon ?? ""}
-              onChange={(e) =>
-                setControls((prev) =>
-                  prev.map((x, j) =>
-                    j === i
-                      ? {
-                          ...x,
-                          lon: e.target.value
-                            ? parseFloat(e.target.value)
-                            : null,
-                        }
-                      : x
-                  )
-                )
-              }
-            />
-          </div>
-          <p className="text-[10px] text-forest-500 mt-1 font-mono">
-            {c.lat != null && c.lon != null
-              ? `${c.lat.toFixed(5)}, ${c.lon.toFixed(5)}`
-              : c.map_x != null
-                ? `map px ${c.map_x.toFixed(0)}, ${c.map_y?.toFixed(0)}`
-                : "not placed"}
-          </p>
-          {touches.length > 0 && (
-            <div className="flex flex-wrap gap-1 mt-1.5">
-              {touches.map((t) => (
-                <span
-                  key={t.id}
-                  title={`${t.name}: ${t.hit ? "touches" : "miss"}`}
-                  className={`inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded ${
-                    t.hit
-                      ? "bg-green-50 text-green-800"
-                      : "bg-amber-50 text-amber-800"
-                  }`}
-                >
+                }
+              />
+              {touches.length > 0 && (
+                <div className="flex flex-wrap items-center gap-1">
                   <span
-                    className="w-1.5 h-1.5 rounded-full"
-                    style={{ background: t.color }}
-                  />
-                  {t.hit ? "✓" : "✗"}
-                </span>
-              ))}
+                    className={`text-[10px] font-mono ${
+                      hitCount === touches.length
+                        ? "text-green-700"
+                        : hitCount === 0
+                          ? "text-amber-700"
+                          : "text-forest-600"
+                    }`}
+                  >
+                    {hitCount}/{touches.length}
+                  </span>
+                  {touches.map((t) => (
+                    <span
+                      key={t.id}
+                      title={`${t.name}: ${t.hit ? "touches" : "miss"}`}
+                      className={`inline-flex items-center gap-1 text-[10px] px-1 py-0.5 rounded ${
+                        t.hit
+                          ? "bg-green-50 text-green-800"
+                          : "bg-amber-50 text-amber-800"
+                      }`}
+                    >
+                      <span
+                        className="w-1.5 h-1.5 rounded-full"
+                        style={{ background: t.color }}
+                      />
+                      {t.hit ? "✓" : "✗"}
+                    </span>
+                  ))}
+                </div>
+              )}
             </div>
-          )}
-        </li>
+            <button
+              type="button"
+              className="text-red-600 text-sm px-1 shrink-0"
+              title="Remove"
+              onClick={() => {
+                setControls((prev) =>
+                  prev
+                    .filter((_, j) => j !== i)
+                    .map((x, j) => ({ ...x, sequence: j }))
+                );
+              }}
+            >
+              ×
+            </button>
+          </li>
         );
       })}
     </ul>
@@ -682,7 +614,7 @@ function MapMarkers({
             key: `c${c.sequence}`,
             x: c.map_x!,
             y: c.map_y!,
-            label: c.code,
+            label: c.code || "?",
             color: "#c0392b",
           }));
 

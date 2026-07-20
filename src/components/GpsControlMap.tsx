@@ -14,6 +14,7 @@ import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import type { GeorefPair, TrackPoint } from "@/lib/types";
 import { fitAffine, mapToGps } from "@/lib/georef";
+import { DEFAULT_MAP_CENTER_TUPLE } from "@/lib/geoDefaults";
 import { trackTouchesControl } from "@/lib/sync";
 import RotatedImageOverlay from "./RotatedImageOverlay";
 
@@ -87,7 +88,7 @@ export default function GpsControlMap({
   tracks = [],
   selectedSequence,
   onPlace,
-  center = [59.33, 18.065],
+  center = DEFAULT_MAP_CENTER_TUPLE,
   mapUrl = null,
   mapWidth = 0,
   mapHeight = 0,
@@ -187,7 +188,7 @@ export default function GpsControlMap({
             }}
           >
             <Tooltip permanent direction="top" offset={[0, -8]}>
-              <span className="font-semibold">{c.code}</span>
+              <span className="font-semibold">{c.code || "?"}</span>
               {touch && touch.total > 0 ? (
                 <span className="ml-1 opacity-80">
                   · {touch.hit}/{touch.total}

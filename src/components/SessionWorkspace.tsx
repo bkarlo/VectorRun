@@ -14,6 +14,7 @@ import type {
 } from "@/lib/types";
 import { SYNC_STRATEGY_LABELS } from "@/lib/types";
 import { fitAffine, imageOverlayBounds } from "@/lib/georef";
+import { DEFAULT_MAP_BOUNDS } from "@/lib/geoDefaults";
 import { applyOffset, computeReferenceSync, findPunchIndex } from "@/lib/sync";
 import { formatSplitTime, formatWallTime, formatSignedDuration, parseSignedDurationToSec } from "@/lib/analysis";
 import {
@@ -57,14 +58,14 @@ export default function SessionWorkspace({
   const [legIndex, setLegIndex] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [replayMs, setReplayMs] = useState(0);
-  const [playbackSpeed, setPlaybackSpeed] = useState(4);
+  const [playbackSpeed, setPlaybackSpeed] = useState(10);
   const [uploadStatus, setUploadStatus] = useState("");
   const [mobileTab, setMobileTab] = useState<"map" | "runners" | "splits">(
     "map"
   );
   const [mapFullscreen, setMapFullscreen] = useState(false);
   const playRef = useRef<number | null>(null);
-  const PLAYBACK_SPEEDS = [1, 2, 4, 8, 16] as const;
+  const PLAYBACK_SPEEDS = [1, 2, 5, 10, 30, 60, 120, 300] as const;
 
   const referenceId =
     analysis.referenceId ??
@@ -190,10 +191,7 @@ export default function SessionWorkspace({
       for (const p of t.syncedPoints.slice(0, 5)) pts.push(p);
     }
     if (pts.length === 0) {
-      return [
-        [59.32, 18.05],
-        [59.34, 18.08],
-      ] as [[number, number], [number, number]];
+      return DEFAULT_MAP_BOUNDS;
     }
     const lats = pts.map((p) => p.lat);
     const lons = pts.map((p) => p.lon);

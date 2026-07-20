@@ -1,4 +1,5 @@
 import type { AffineTransform, GeoPoint, GeorefPair, MapPixel } from "./types";
+import { DEFAULT_MAP_CENTER } from "./geoDefaults";
 
 /**
  * Fit an affine transform from map pixels to WGS84 using least squares.
@@ -264,8 +265,8 @@ export function initialOverlayPlacement(
 ): OverlayPlacement {
   if (width <= 0 || height <= 0) {
     return {
-      centerLat: 59.33,
-      centerLon: 18.065,
+      centerLat: DEFAULT_MAP_CENTER.lat,
+      centerLon: DEFAULT_MAP_CENTER.lon,
       widthM: 500,
       heightM: 500,
       rotationDeg: 0,
@@ -278,10 +279,10 @@ export function initialOverlayPlacement(
     maxLon = -Infinity;
 
   if (trackPoints.length === 0) {
-    minLat = 59.32;
-    maxLat = 59.34;
-    minLon = 18.05;
-    maxLon = 18.08;
+    minLat = DEFAULT_MAP_CENTER.lat - 0.01;
+    maxLat = DEFAULT_MAP_CENTER.lat + 0.01;
+    minLon = DEFAULT_MAP_CENTER.lon - 0.015;
+    maxLon = DEFAULT_MAP_CENTER.lon + 0.015;
   } else {
     for (const p of trackPoints) {
       if (p.lat < minLat) minLat = p.lat;

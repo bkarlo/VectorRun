@@ -13,6 +13,7 @@ import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import type { GeorefPair, MapPixel, TrackPoint } from "@/lib/types";
 import { fitAffine, mapToGps } from "@/lib/georef";
+import { DEFAULT_MAP_CENTER, DEFAULT_MAP_CENTER_TUPLE } from "@/lib/geoDefaults";
 import RotatedImageOverlay from "./RotatedImageOverlay";
 
 export interface OverlayTrack {
@@ -193,7 +194,7 @@ export default function MapOverlayFit({
     if (!allMapPicked) return;
     const center =
       trackCentroid(tracks) ??
-      points.find((p) => p.gps)?.gps ?? { lat: 47.5, lon: 19.0 };
+      points.find((p) => p.gps)?.gps ?? { ...DEFAULT_MAP_CENTER };
 
     setPoints((prev) =>
       prev.map((p, i) => ({
@@ -241,7 +242,7 @@ export default function MapOverlayFit({
     if (c) return [c.lat, c.lon];
     const g = points.find((p) => p.gps)?.gps;
     if (g) return [g.lat, g.lon];
-    return [47.5, 19.0];
+    return DEFAULT_MAP_CENTER_TUPLE;
   })();
 
   return (
