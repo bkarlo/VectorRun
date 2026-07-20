@@ -1,7 +1,7 @@
 import { haversineM, interpolateAtTime } from "./gpx";
 import type { ControlRow, SyncStrategy, TrackPoint } from "./types";
 
-const PUNCH_RADIUS_M = 25;
+export const PUNCH_RADIUS_M = 25;
 
 export function findPunchIndex(
   points: TrackPoint[],
@@ -30,6 +30,15 @@ export function findPunchIndex(
     }
   }
   return bestDist <= 80 ? best : -1;
+}
+
+/** Whether a track comes within punch radius of a control (any point). */
+export function trackTouchesControl(
+  points: TrackPoint[],
+  control: { lat: number; lon: number },
+  radiusM = PUNCH_RADIUS_M
+): boolean {
+  return findPunchIndex(points, control, 0, radiusM) >= 0;
 }
 
 export function recordingStartAbs(points: TrackPoint[]): number {
@@ -299,5 +308,3 @@ export function applyOffset(
 export function defaultSyncStrategy(hasGeoControls: boolean): SyncStrategy {
   return hasGeoControls ? "first_control" : "motion_start";
 }
-
-export { PUNCH_RADIUS_M };

@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useRef } from "react";
+import { useMemo, useRef, useState } from "react";
 import type { TrackPoint } from "@/lib/types";
 import {
   mpsToKmh,
@@ -9,6 +9,7 @@ import {
   speedProfile,
   type SpeedSample,
 } from "@/lib/speed";
+import { findPunchIndex } from "@/lib/sync";
 
 interface RunnerSeries {
   id: string;
@@ -17,12 +18,33 @@ interface RunnerSeries {
   points: TrackPoint[];
 }
 
+export interface SpeedChartControl {
+  code: string;
+  sequence: number;
+  lat: number;
+  lon: number;
+}
+
+interface PunchDot {
+  key: string;
+  runnerId: string;
+  runnerName: string;
+  color: string;
+  code: string;
+  timeMs: number;
+  speedMps: number;
+  x: number;
+  y: number;
+}
+
 interface Props {
   runners: RunnerSeries[];
   timeMin: number;
   timeMax: number;
   replayMs: number;
   onSeek: (t: number) => void;
+  /** Course controls with GPS — punches drawn on every runner's line */
+  controls?: SpeedChartControl[];
 }
 
 const W = 600;
@@ -35,9 +57,16 @@ export default function SpeedChart({
   timeMax,
   replayMs,
   onSeek,
+  controls = [],
 }: Props) {
   const svgRef = useRef<SVGSVGElement>(null);
   const duration = Math.max(1, timeMax - timeMin);
+  const [tip, setTip] = useState<{
+    code: string;
+    runnerName: string;
+    x: number;
+    y: number;
+  } | null>(null);
 
   const series = useMemo(() => {
     return runners.map((r) => ({
@@ -51,7 +80,6 @@ export default function SpeedChart({
     for (const s of series) {
       for (const p of s.samples) m = Math.max(m, p.speedMps);
     }
-    // Round up to nice km/h bucket
     const kmh = mpsToKmh(m);
     const nice = Math.ceil(kmh / 2) * 2 || 2;
     return nice / 3.6;
@@ -76,6 +104,45 @@ export default function SpeedChart({
       })
       .join(" ");
   };
+
+  const punchDots = useMemo(() => {
+    if (controls.length === 0) return [] as PunchDot[];
+    const geo = [...controls].sort((a, b) => a.sequence - b.sequence);
+    const dots: PunchDot[] = [];
+
+    for (const s of series) {
+      if (s.points.length === 0) continue;
+      let fromIdx = 0;
+      for (const c of geo) {
+        const idx = findPunchIndex(
+          s.points,
+          { lat: c.lat, lon: c.lon },
+          fromIdx
+        );
+        if (idx < 0) continue;
+        const timeMs = s.points[idx].time;
+        if (timeMs < timeMin || timeMs > timeMax) {
+          fromIdx = idx + 1;
+          continue;
+        }
+        const mps = speedAtTime(s.samples, timeMs) ?? 0;
+        dots.push({
+          key: `${s.id}-${c.sequence}-${c.code}`,
+          runnerId: s.id,
+          runnerName: s.name,
+          color: s.color,
+          code: c.code,
+          timeMs,
+          speedMps: mps,
+          x: xScale(timeMs),
+          y: yScale(mps),
+        });
+        fromIdx = idx + 1;
+      }
+    }
+    return dots;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [series, controls, timeMin, timeMax, maxSpeed, duration]);
 
   const playheadX = xScale(Math.min(timeMax, Math.max(timeMin, replayMs)));
 
@@ -111,7 +178,7 @@ export default function SpeedChart({
   }
 
   return (
-    <div className="border-t border-forest-100 pt-2">
+    <div className="border-t border-forest-100 pt-2 relative">
       <div className="flex items-center justify-between gap-2 mb-1 px-0.5">
         <span className="text-[10px] uppercase tracking-wider text-forest-500 font-semibold">
           Speed
@@ -143,14 +210,17 @@ export default function SpeedChart({
         className="w-full h-[88px] cursor-crosshair select-none"
         preserveAspectRatio="none"
         onPointerDown={(e) => {
+          if ((e.target as Element).closest?.("[data-punch]")) return;
           (e.target as Element).setPointerCapture?.(e.pointerId);
           onPointer(e.clientX);
+          setTip(null);
         }}
         onPointerMove={(e) => {
-          if (e.buttons === 1) onPointer(e.clientX);
+          if (e.buttons === 1 && !(e.target as Element).closest?.("[data-punch]")) {
+            onPointer(e.clientX);
+          }
         }}
       >
-        {/* grid */}
         {yTicks.map((tick) => (
           <g key={tick.label}>
             <line
@@ -189,7 +259,41 @@ export default function SpeedChart({
           />
         ))}
 
-        {/* playhead */}
+        {/* Punch dots on each runner's line */}
+        {punchDots.map((d) => (
+          <g
+            key={d.key}
+            data-punch
+            className="cursor-pointer"
+            onPointerDown={(e) => {
+              e.stopPropagation();
+              onSeek(d.timeMs);
+              setTip({
+                code: d.code,
+                runnerName: d.runnerName,
+                x: d.x,
+                y: d.y,
+              });
+            }}
+          >
+            {/* larger hit target */}
+            <circle cx={d.x} cy={d.y} r={8} fill="transparent" />
+            <circle
+              cx={d.x}
+              cy={d.y}
+              r={3.5}
+              fill={d.color}
+              stroke="#fff"
+              strokeWidth={1.25}
+              vectorEffect="non-scaling-stroke"
+            >
+              <title>
+                {d.code} · {d.runnerName}
+              </title>
+            </circle>
+          </g>
+        ))}
+
         <line
           x1={playheadX}
           x2={playheadX}
@@ -200,6 +304,20 @@ export default function SpeedChart({
           opacity={0.55}
         />
       </svg>
+
+      {tip && (
+        <div
+          className="absolute z-10 pointer-events-none -translate-x-1/2 -translate-y-full px-2 py-1 rounded bg-forest-900 text-white text-[10px] font-mono shadow whitespace-nowrap"
+          style={{
+            left: `${(tip.x / W) * 100}%`,
+            top: `${(tip.y / H) * 100}%`,
+            marginTop: -6,
+          }}
+        >
+          <span className="font-bold">{tip.code}</span>
+          <span className="opacity-80"> · {tip.runnerName}</span>
+        </div>
+      )}
     </div>
   );
 }

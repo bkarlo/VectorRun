@@ -5,7 +5,8 @@ import dynamic from "next/dynamic";
 import Link from "next/link";
 import type { GeorefPair, TrackPoint } from "@/lib/types";
 import { actionSaveGeoref, actionSaveControls } from "@/app/actions";
-import { fitAffine, mapToGps } from "@/lib/georef";
+import { fitAffine, gpsToMap, mapToGps } from "@/lib/georef";
+import { trackTouchesControl } from "@/lib/sync";
 
 const GpsControlMap = dynamic(() => import("./GpsControlMap"), { ssr: false });
 const MapOverlayFit = dynamic(() => import("./MapOverlayFit"), { ssr: false });
@@ -57,6 +58,9 @@ export default function SetupWizard(props: Props) {
   });
   const [tracks] = useState(props.tracks);
   const [mode, setMode] = useState<Mode>(() => {
+    if (props.initialControls.some((c) => c.lat != null && c.lon != null)) {
+      return "controls";
+    }
     if (mapUrl) return "place";
     return "controls";
   });
@@ -95,8 +99,8 @@ export default function SetupWizard(props: Props) {
     setMode("place");
     setStatus(
       tracks.length
-        ? "Map uploaded — drag/scale over tracks until it fits"
-        : "Map uploaded — upload GPX tracks, then place the map over them"
+        ? "Map uploaded — pick 3 points on the image, then place them on OSM"
+        : "Map uploaded — upload GPX tracks, then georeference with 3 points"
     );
   };
 
@@ -133,10 +137,18 @@ export default function SetupWizard(props: Props) {
   );
 
   const placeControlAtGps = (lat: number, lon: number) => {
+    const transform = fitAffine(georef);
+    const mapPx = transform ? gpsToMap(transform, { lat, lon }) : null;
     setControls((prev) =>
       prev.map((c, i) =>
         i === selectedControl
-          ? { ...c, lat, lon, map_x: null, map_y: null }
+          ? {
+              ...c,
+              lat,
+              lon,
+              map_x: mapPx?.x ?? c.map_x,
+              map_y: mapPx?.y ?? c.map_y,
+            }
           : c
       )
     );
@@ -216,8 +228,8 @@ export default function SetupWizard(props: Props) {
           Tracks first, map later
         </h3>
         <p className="text-sm text-forest-600 mb-3">
-          Upload GPX anytime. When you add a map image, place it over the OSM
-          layer (move / scale at ~50% opacity) until it matches the tracks.
+          Upload GPX anytime. When you add a map image, pick 3 clear features on
+          the map and drag those points onto OSM/tracks to lock the georeference.
         </p>
         <div className="flex flex-wrap gap-2 items-center">
           <label className="rounded-lg bg-forest-700 text-white px-4 py-2 cursor-pointer hover:bg-forest-800 text-sm font-medium">
@@ -341,31 +353,11 @@ export default function SetupWizard(props: Props) {
                   />
                 )}
               </>
-            ) : mode === "controls" && mapUrl ? (
-              <>
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                  ref={imgRef}
-                  src={mapUrl}
-                  alt="Orienteering map"
-                  className="w-full h-auto cursor-crosshair select-none"
-                  onClick={onImageClick}
-                  draggable={false}
-                />
-                {mapSize.w > 0 && imgRef.current && (
-                  <MapMarkers
-                    georef={georef}
-                    controls={controls}
-                    mode={mode}
-                    mapW={mapSize.w}
-                    mapH={mapSize.h}
-                    img={imgRef.current}
-                  />
-                )}
-              </>
             ) : mode === "controls" ? (
               <GpsControlMap
                 controls={placedGpsControls}
+                tracks={tracks}
+                selectedSequence={controls[selectedControl]?.sequence}
                 onPlace={placeControlAtGps}
               />
             ) : (
@@ -439,15 +431,16 @@ export default function SetupWizard(props: Props) {
               <div className="panel rounded-xl p-4 space-y-3">
                 <h3 className="font-display text-lg">Course controls</h3>
                 <p className="text-sm text-forest-600">
-                  {mapUrl
-                    ? "Select a control, click the map image to place it."
-                    : "Select a control, click the OSM map to set GPS."}
+                  Select a control, click the OSM map (tracks shown). Green =
+                  all tracks touch it; amber = none do. Saved controls reload
+                  automatically.
                 </p>
                 <ControlList
                   controls={controls}
                   selectedControl={selectedControl}
                   setSelectedControl={setSelectedControl}
                   setControls={setControls}
+                  tracks={tracks}
                 />
                 <div className="flex gap-2">
                   <button
@@ -491,15 +484,32 @@ function ControlList({
   selectedControl,
   setSelectedControl,
   setControls,
+  tracks,
 }: {
   controls: ControlDraft[];
   selectedControl: number;
   setSelectedControl: (i: number) => void;
   setControls: React.Dispatch<React.SetStateAction<ControlDraft[]>>;
+  tracks: SetupTrack[];
 }) {
   return (
     <ul className="space-y-2 max-h-[360px] overflow-auto">
-      {controls.map((c, i) => (
+      {controls.map((c, i) => {
+        const touches =
+          c.lat != null && c.lon != null && tracks.length > 0
+            ? tracks.map((t) => ({
+                id: t.id,
+                name: t.name,
+                color: t.color,
+                hit: trackTouchesControl(t.points, {
+                  lat: c.lat!,
+                  lon: c.lon!,
+                }),
+              }))
+            : [];
+        const hitCount = touches.filter((t) => t.hit).length;
+
+        return (
         <li
           key={i}
           className={`rounded-lg border p-2 ${
@@ -515,6 +525,19 @@ function ControlList({
           >
             {c.code}{" "}
             <span className="text-xs text-forest-500">seq {c.sequence}</span>
+            {touches.length > 0 && (
+              <span
+                className={`ml-2 text-[10px] font-mono ${
+                  hitCount === touches.length
+                    ? "text-green-700"
+                    : hitCount === 0
+                      ? "text-amber-700"
+                      : "text-forest-600"
+                }`}
+              >
+                tracks {hitCount}/{touches.length}
+              </span>
+            )}
           </button>
           <div className="grid grid-cols-2 gap-1">
             <input
@@ -589,8 +612,30 @@ function ControlList({
                 ? `map px ${c.map_x.toFixed(0)}, ${c.map_y?.toFixed(0)}`
                 : "not placed"}
           </p>
+          {touches.length > 0 && (
+            <div className="flex flex-wrap gap-1 mt-1.5">
+              {touches.map((t) => (
+                <span
+                  key={t.id}
+                  title={`${t.name}: ${t.hit ? "touches" : "miss"}`}
+                  className={`inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded ${
+                    t.hit
+                      ? "bg-green-50 text-green-800"
+                      : "bg-amber-50 text-amber-800"
+                  }`}
+                >
+                  <span
+                    className="w-1.5 h-1.5 rounded-full"
+                    style={{ background: t.color }}
+                  />
+                  {t.hit ? "✓" : "✗"}
+                </span>
+              ))}
+            </div>
+          )}
         </li>
-      ))}
+        );
+      })}
     </ul>
   );
 }

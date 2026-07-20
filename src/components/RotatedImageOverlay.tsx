@@ -186,27 +186,43 @@ export default function RotatedImageOverlay({
   topRight,
   bottomLeft,
   opacity = 0.55,
+  /** Leaflet pane name — use mapImagePane (z < overlay) so tracks stay on top */
+  pane = "mapImagePane",
 }: {
   url: string;
   topLeft: LatLngTuple;
   topRight: LatLngTuple;
   bottomLeft: LatLngTuple;
   opacity?: number;
+  pane?: string;
 }) {
   const map = useMap();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const layerRef = useRef<any>(null);
 
-  // Create once per url
+  useEffect(() => {
+    if (!map.getPane(pane)) {
+      map.createPane(pane);
+      const p = map.getPane(pane);
+      if (p) p.style.zIndex = "350"; // below overlayPane (400) → tracks above map
+    }
+  }, [map, pane]);
+
+  // Create once per url/pane
   useEffect(() => {
     ensureRotatedOverlayClass();
+    if (!map.getPane(pane)) {
+      map.createPane(pane);
+      const p = map.getPane(pane);
+      if (p) p.style.zIndex = "350";
+    }
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const layer = (L.imageOverlay as any).rotated(
       url,
       topLeft,
       topRight,
       bottomLeft,
-      { opacity, interactive: false }
+      { opacity, interactive: false, pane }
     );
     layer.addTo(map);
     layerRef.current = layer;
@@ -214,9 +230,8 @@ export default function RotatedImageOverlay({
       map.removeLayer(layer);
       layerRef.current = null;
     };
-    // Corners/opacity updated below — only remount when url changes
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [map, url]);
+  }, [map, url, pane]);
 
   useEffect(() => {
     const layer = layerRef.current;

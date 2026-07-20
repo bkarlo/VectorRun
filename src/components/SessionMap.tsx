@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import {
   CircleMarker,
   MapContainer,
@@ -59,6 +59,8 @@ interface TrackLayer {
 
 interface Props {
   bounds: [[number, number], [number, number]];
+  /** When set (e.g. selected leg), fly the map to this region. */
+  focusBounds?: [[number, number], [number, number]] | null;
   mapUrl: string | null;
   mapAffine: AffineTransform | null;
   mapWidth: number;
@@ -76,8 +78,24 @@ function FitBounds({
   bounds: [[number, number], [number, number]];
 }) {
   const map = useMap();
+  const done = useRef(false);
   useEffect(() => {
+    if (done.current) return;
     map.fitBounds(bounds, { padding: [24, 24] });
+    done.current = true;
+  }, [map, bounds]);
+  return null;
+}
+
+function FocusBounds({
+  bounds,
+}: {
+  bounds: [[number, number], [number, number]] | null | undefined;
+}) {
+  const map = useMap();
+  useEffect(() => {
+    if (!bounds) return;
+    map.fitBounds(bounds, { padding: [48, 48], maxZoom: 17, animate: true });
   }, [map, bounds]);
   return null;
 }
@@ -114,8 +132,8 @@ function TrackGroup({
         positions={latlngs}
         pathOptions={{
           color,
-          weight: emphasize ? 3 : 2.5,
-          opacity: 0.75,
+          weight: emphasize ? 3.5 : 3,
+          opacity: 1,
         }}
       />
       {pos && (
@@ -131,6 +149,7 @@ function TrackGroup({
 
 export default function SessionMap({
   bounds,
+  focusBounds,
   mapUrl,
   mapAffine,
   mapWidth,
@@ -171,6 +190,7 @@ export default function SessionMap({
         opacity={hasMap ? 0.4 : 1}
       />
       <FitBounds bounds={bounds} />
+      <FocusBounds bounds={focusBounds} />
       <InvalidateSize token={resizeToken} />
 
       {hasMap && mapUrl && corners && (

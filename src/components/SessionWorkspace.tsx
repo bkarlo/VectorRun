@@ -14,7 +14,7 @@ import type {
 } from "@/lib/types";
 import { SYNC_STRATEGY_LABELS } from "@/lib/types";
 import { fitAffine, imageOverlayBounds } from "@/lib/georef";
-import { applyOffset, computeReferenceSync } from "@/lib/sync";
+import { applyOffset, computeReferenceSync, findPunchIndex } from "@/lib/sync";
 import { formatSplitTime, formatWallTime, formatSignedDuration, parseSignedDurationToSec } from "@/lib/analysis";
 import {
   actionDeleteParticipant,
@@ -225,6 +225,66 @@ export default function SessionWorkspace({
   const currentLeg = analysis.legs[legIndex];
   const duration = timeRange.max - timeRange.min;
   const relMs = replayMs - timeRange.min;
+
+  const legFocusBounds = useMemo(() => {
+    if (!currentLeg) return null;
+    const from = controls.find((c) => c.sequence === currentLeg.fromSeq);
+    const to = controls.find((c) => c.sequence === currentLeg.toSeq);
+    if (
+      !from ||
+      !to ||
+      from.lat == null ||
+      from.lon == null ||
+      to.lat == null ||
+      to.lon == null
+    ) {
+      return null;
+    }
+
+    const pts: { lat: number; lon: number }[] = [
+      { lat: from.lat, lon: from.lon },
+      { lat: to.lat, lon: to.lon },
+    ];
+
+    for (const t of syncedTracks) {
+      if (!selected[t.participant.id]) continue;
+      const fromIdx = findPunchIndex(t.syncedPoints, {
+        lat: from.lat,
+        lon: from.lon,
+      });
+      if (fromIdx < 0) continue;
+      const toIdx = findPunchIndex(
+        t.syncedPoints,
+        { lat: to.lat, lon: to.lon },
+        fromIdx + 1
+      );
+      if (toIdx <= fromIdx) continue;
+      const step = Math.max(1, Math.floor((toIdx - fromIdx) / 40));
+      for (let i = fromIdx; i <= toIdx; i += step) {
+        pts.push(t.syncedPoints[i]);
+      }
+      pts.push(t.syncedPoints[toIdx]);
+    }
+
+    const lats = pts.map((p) => p.lat);
+    const lons = pts.map((p) => p.lon);
+    return [
+      [Math.min(...lats), Math.min(...lons)],
+      [Math.max(...lats), Math.max(...lons)],
+    ] as [[number, number], [number, number]];
+  }, [currentLeg, controls, syncedTracks, selected]);
+
+  const speedControlMarks = useMemo(() => {
+    return [...controls]
+      .filter((c) => c.lat != null && c.lon != null)
+      .sort((a, b) => a.sequence - b.sequence)
+      .map((c) => ({
+        code: c.code,
+        sequence: c.sequence,
+        lat: c.lat!,
+        lon: c.lon!,
+      }));
+  }, [controls]);
 
   const refWallTime =
     analysis.referenceWallTimeMs ??
@@ -567,6 +627,7 @@ export default function SessionWorkspace({
           <div className="relative flex-1 min-h-[40dvh] lg:min-h-0">
             <SessionMap
               bounds={bounds}
+              focusBounds={legFocusBounds}
               mapUrl={map ? `/api/maps/${event.id}` : null}
               mapAffine={affine}
               mapWidth={map?.width ?? 0}
@@ -660,6 +721,7 @@ export default function SessionWorkspace({
                 timeMin={timeRange.min}
                 timeMax={timeRange.max}
                 replayMs={replayMs}
+                controls={speedControlMarks}
                 onSeek={(t) => {
                   setPlaying(false);
                   setReplayMs(t);
@@ -753,6 +815,7 @@ export default function SessionWorkspace({
           <div className="relative flex-1 min-h-0">
             <SessionMap
               bounds={bounds}
+              focusBounds={legFocusBounds}
               mapUrl={map ? `/api/maps/${event.id}` : null}
               mapAffine={affine}
               mapWidth={map?.width ?? 0}
