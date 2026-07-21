@@ -485,3 +485,32 @@ Many existing tools (such as Livelox, QuickRoute, and RouteGadget) already provi
     * “Which control generated the greatest variation in route choice today?”
 
 Those features would move VectorRun from being a visualization tool to becoming an intelligent coaching platform.
+
+⸻
+
+## Implementation milestones
+
+### Milestone 1A — Session workspace (shipped)
+
+Events, optional georeferenced map, controls, GPX upload, sync strategies, multi-runner replay, speed chart, and per-leg splits (time / distance / climb / pace).
+
+### Milestone 1B — Leg storytelling (current)
+
+Turn each selected leg into an explainable story for coaching later:
+
+* Shared punch-based leg segment helper (`legSegmentIndices` / `legSegmentPoints`).
+* Map: dim full course tracks; emphasize all punched routes on the active leg.
+* Hesitation detection (low-speed clusters) stored on `LegSplit.hesitations`.
+* Peer-anchored decision quality (not an abstract ideal line):
+  * **Come-back** — solo geometric reverse toward the next control after overshooting.
+  * **vsBest** — time + distance vs the fastest punched runner on that leg.
+  * **Detours** — contiguous deviation from the fastest runner’s polyline.
+* Surface on map markers, speed-chart ticks, and splits badges.
+
+This payload is the structured evidence a future AI coach will narrate.
+
+### Milestone 1C — Clustering + AI coach (next)
+
+* Route clustering / medoids so multiple valid choices are not flagged as “wrong.”
+* Richer mistake taxonomy and “what if you took X’s route” comparison.
+* Natural-language coaching on top of the 1B feature fields.

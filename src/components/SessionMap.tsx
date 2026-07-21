@@ -57,6 +57,16 @@ interface TrackLayer {
   points: TrackPoint[];
 }
 
+export interface StoryMarker {
+  key: string;
+  lat: number;
+  lon: number;
+  kind: "hesitation" | "comeback" | "detour";
+  label: string;
+  color: string;
+  atMs?: number;
+}
+
 interface Props {
   bounds: [[number, number], [number, number]];
   /** When set (e.g. selected leg), fly the map to this region. */
@@ -67,6 +77,9 @@ interface Props {
   mapHeight: number;
   controls: ControlRow[];
   tracks: TrackLayer[];
+  /** Active-leg corridor polylines (bold). When set, full tracks are dimmed. */
+  legTracks?: TrackLayer[];
+  storyMarkers?: StoryMarker[];
   replayMs: number;
   highlightLeg: { fromSeq: number; toSeq: number } | null;
   resizeToken?: string | number;
@@ -100,7 +113,6 @@ function FocusBounds({
     const key = bounds.flat().map((n) => n.toFixed(6)).join(",");
     if (key === lastKey.current) return;
     lastKey.current = key;
-    // Gentle pan/zoom to the active leg — only when the segment changes
     map.fitBounds(bounds, {
       padding: [56, 56],
       maxZoom: 16,
@@ -122,41 +134,11 @@ function InvalidateSize({ token }: { token?: string | number }) {
   return null;
 }
 
-function TrackGroup({
-  name,
-  color,
-  latlngs,
-  pos,
-  icon,
-  emphasize,
-}: {
-  name: string;
-  color: string;
-  latlngs: [number, number][];
-  pos: TrackPoint | null;
-  icon: L.DivIcon;
-  emphasize: boolean;
-}) {
-  return (
-    <>
-      <Polyline
-        positions={latlngs}
-        pathOptions={{
-          color,
-          weight: emphasize ? 3.5 : 3,
-          opacity: 1,
-        }}
-      />
-      {pos && (
-        <Marker position={[pos.lat, pos.lon]} icon={icon}>
-          <Tooltip direction="top" offset={[0, -16]}>
-            {name}
-          </Tooltip>
-        </Marker>
-      )}
-    </>
-  );
-}
+const STORY_COLORS = {
+  hesitation: "#d97706",
+  comeback: "#7c3aed",
+  detour: "#6d28d9",
+} as const;
 
 export default function SessionMap({
   bounds,
@@ -167,6 +149,8 @@ export default function SessionMap({
   mapHeight,
   controls,
   tracks,
+  legTracks = [],
+  storyMarkers = [],
   replayMs,
   highlightLeg,
   resizeToken,
@@ -185,6 +169,7 @@ export default function SessionMap({
   }, [mapAffine, mapWidth, mapHeight]);
 
   const hasMap = !!(mapUrl && corners);
+  const dimFull = !!highlightLeg && legTracks.length > 0;
 
   return (
     <MapContainer
@@ -235,25 +220,73 @@ export default function SessionMap({
           </CircleMarker>
         ))}
 
+      {/* Full course tracks (dimmed when a leg is emphasized) */}
       {tracks.map((t) => {
         const latlngs = t.points.map(
           (p) => [p.lat, p.lon] as [number, number]
         );
-        const pos = interpolateAtTime(t.points, replayMs);
-        const icon = runnerAvatarIcon(t.name, t.color);
-
         return (
-          <TrackGroup
-            key={t.id}
-            name={t.name}
-            color={t.color}
-            latlngs={latlngs}
-            pos={pos}
-            icon={icon}
-            emphasize={!!highlightLeg}
+          <Polyline
+            key={`full-${t.id}`}
+            positions={latlngs}
+            pathOptions={{
+              color: t.color,
+              weight: dimFull ? 2 : 3,
+              opacity: dimFull ? 0.28 : 1,
+            }}
           />
         );
       })}
+
+      {/* Active leg corridor */}
+      {legTracks.map((t) => {
+        const latlngs = t.points.map(
+          (p) => [p.lat, p.lon] as [number, number]
+        );
+        return (
+          <Polyline
+            key={`leg-${t.id}`}
+            positions={latlngs}
+            pathOptions={{
+              color: t.color,
+              weight: 4,
+              opacity: 0.95,
+            }}
+          />
+        );
+      })}
+
+      {/* Runner avatars at replay time */}
+      {tracks.map((t) => {
+        const pos = interpolateAtTime(t.points, replayMs);
+        if (!pos) return null;
+        const icon = runnerAvatarIcon(t.name, t.color);
+        return (
+          <Marker key={`av-${t.id}`} position={[pos.lat, pos.lon]} icon={icon}>
+            <Tooltip direction="top" offset={[0, -16]}>
+              {t.name}
+            </Tooltip>
+          </Marker>
+        );
+      })}
+
+      {storyMarkers.map((m) => (
+        <CircleMarker
+          key={m.key}
+          center={[m.lat, m.lon]}
+          radius={m.kind === "hesitation" ? 7 : 8}
+          pathOptions={{
+            color: "#fff",
+            fillColor: STORY_COLORS[m.kind],
+            fillOpacity: 0.9,
+            weight: 2,
+          }}
+        >
+          <Tooltip direction="top" offset={[0, -6]}>
+            {m.label}
+          </Tooltip>
+        </CircleMarker>
+      ))}
     </MapContainer>
   );
 }

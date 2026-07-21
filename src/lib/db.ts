@@ -122,13 +122,13 @@ function migrate(database: Database.Database) {
     );
   }
 
-  // Bump cache when sync semantics change
+  // Bump cache when analysis payload semantics change
   const userVersion = Number(
     database.pragma("user_version", { simple: true }) ?? 0
   );
-  if (userVersion < 4) {
+  if (userVersion < 6) {
     database.exec(`DELETE FROM analysis_cache`);
-    database.pragma("user_version = 4");
+    database.pragma("user_version = 6");
   }
 }
 

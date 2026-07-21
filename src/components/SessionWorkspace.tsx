@@ -15,8 +15,22 @@ import type {
 import { SYNC_STRATEGY_LABELS } from "@/lib/types";
 import { fitAffine, imageOverlayBounds } from "@/lib/georef";
 import { DEFAULT_MAP_BOUNDS } from "@/lib/geoDefaults";
-import { applyOffset, computeReferenceSync, findPunchIndex } from "@/lib/sync";
-import { formatSplitTime, formatWallTime, formatSignedDuration, parseSignedDurationToSec, formatLegPace, medalForRank } from "@/lib/analysis";
+import {
+  applyOffset,
+  computeReferenceSync,
+  findPunchIndex,
+  legSegmentIndices,
+  legSegmentPoints,
+} from "@/lib/sync";
+import {
+  formatSplitTime,
+  formatWallTime,
+  formatSignedDuration,
+  parseSignedDurationToSec,
+  formatLegPace,
+  medalForRank,
+} from "@/lib/analysis";
+import { isExtraDistanceFlag, isNotableComeBack } from "@/lib/decisionQuality";
 import {
   actionDeleteParticipant,
   actionRenameParticipant,
@@ -137,9 +151,63 @@ export default function SessionWorkspace({
     return { min, max: Math.max(max, min + 1) };
   }, [syncedTracks, selected]);
 
+  const currentLeg = analysis.legs[legIndex];
+
+  const currentLegCtrl = useMemo(() => {
+    if (!currentLeg) return null;
+    const from = controls.find((c) => c.sequence === currentLeg.fromSeq);
+    const to = controls.find((c) => c.sequence === currentLeg.toSeq);
+    if (
+      !from ||
+      !to ||
+      from.lat == null ||
+      from.lon == null ||
+      to.lat == null ||
+      to.lon == null
+    ) {
+      return null;
+    }
+    return {
+      from: { lat: from.lat, lon: from.lon },
+      to: { lat: to.lat, lon: to.lon },
+    };
+  }, [currentLeg, controls]);
+
+  /** Leg-zoomed window: earliest from-punch → latest to-punch among selected. */
+  const legTimeRange = useMemo(() => {
+    if (!currentLegCtrl) return null;
+    let minFrom = Infinity;
+    let maxTo = -Infinity;
+    for (const t of syncedTracks) {
+      if (!selected[t.participant.id]) continue;
+      const idx = legSegmentIndices(
+        t.syncedPoints,
+        currentLegCtrl.from,
+        currentLegCtrl.to
+      );
+      if (!idx) continue;
+      minFrom = Math.min(minFrom, t.syncedPoints[idx.fromIdx].time);
+      maxTo = Math.max(maxTo, t.syncedPoints[idx.toIdx].time);
+    }
+    if (!Number.isFinite(minFrom) || !Number.isFinite(maxTo) || maxTo <= minFrom) {
+      return null;
+    }
+    return { min: minFrom, max: maxTo };
+  }, [currentLegCtrl, syncedTracks, selected]);
+
+  const splitsPlayback =
+    mobileTab === "splits" && legTimeRange != null;
+  const playbackRange = splitsPlayback ? legTimeRange! : timeRange;
+
   useEffect(() => {
     setReplayMs(timeRange.min);
   }, [timeRange.min]);
+
+  useEffect(() => {
+    if (!splitsPlayback || !legTimeRange) return;
+    setReplayMs(legTimeRange.min);
+    setPlaying(false);
+  }, [splitsPlayback, legTimeRange?.min, legIndex]);
 
   useEffect(() => {
     if (!playing) {
@@ -152,9 +220,9 @@ export default function SessionWorkspace({
       last = now;
       setReplayMs((t) => {
         const next = t + dt * playbackSpeed;
-        if (next >= timeRange.max) {
+        if (next >= playbackRange.max) {
           setPlaying(false);
-          return timeRange.max;
+          return playbackRange.max;
         }
         return next;
       });
@@ -164,7 +232,7 @@ export default function SessionWorkspace({
     return () => {
       if (playRef.current) cancelAnimationFrame(playRef.current);
     };
-  }, [playing, timeRange.max, playbackSpeed]);
+  }, [playing, playbackRange.max, playbackSpeed]);
 
   useEffect(() => {
     if (!mapFullscreen) return;
@@ -221,9 +289,8 @@ export default function SessionWorkspace({
     window.location.reload();
   };
 
-  const currentLeg = analysis.legs[legIndex];
-  const duration = timeRange.max - timeRange.min;
-  const relMs = replayMs - timeRange.min;
+  const duration = playbackRange.max - playbackRange.min;
+  const relMs = Math.max(0, replayMs - playbackRange.min);
 
   // Follow mode: advance leg when the followed runner punches the next control
   useEffect(() => {
@@ -277,49 +344,117 @@ export default function SessionWorkspace({
     controls,
   ]);
 
-  const legFocusBounds = useMemo(() => {
-    if (!currentLeg) return null;
-    const from = controls.find((c) => c.sequence === currentLeg.fromSeq);
-    const to = controls.find((c) => c.sequence === currentLeg.toSeq);
-    if (
-      !from ||
-      !to ||
-      from.lat == null ||
-      from.lon == null ||
-      to.lat == null ||
-      to.lon == null
-    ) {
-      return null;
+  const legTracks = useMemo(() => {
+    if (!currentLegCtrl) return [];
+    return syncedTracks
+      .filter((t) => selected[t.participant.id])
+      .map((t) => {
+        const pts = legSegmentPoints(
+          t.syncedPoints,
+          currentLegCtrl.from,
+          currentLegCtrl.to
+        );
+        if (!pts?.length) return null;
+        return {
+          id: t.participant.id,
+          name: t.participant.name,
+          color: t.participant.color,
+          points: pts,
+        };
+      })
+      .filter((x): x is NonNullable<typeof x> => x != null);
+  }, [currentLegCtrl, syncedTracks, selected]);
+
+  const storyMarkers = useMemo(() => {
+    if (!currentLeg) return [];
+    const marks: {
+      key: string;
+      lat: number;
+      lon: number;
+      kind: "hesitation" | "comeback" | "detour";
+      label: string;
+      color: string;
+      atMs?: number;
+    }[] = [];
+
+    for (const s of currentLeg.splits) {
+      if (!selected[s.participantId]) continue;
+      for (const h of s.hesitations ?? []) {
+        marks.push({
+          key: `h-${s.participantId}-${h.startMs}`,
+          lat: h.lat,
+          lon: h.lon,
+          kind: "hesitation",
+          label: `${s.participantName}: hesitation ${Math.round(h.durationMs / 1000)}s`,
+          color: s.color,
+          atMs: h.startMs,
+        });
+      }
+      if (isNotableComeBack(s.comeBack) && s.comeBack) {
+        marks.push({
+          key: `cb-${s.participantId}-${s.comeBack.atMs}`,
+          lat: s.comeBack.lat,
+          lon: s.comeBack.lon,
+          kind: "comeback",
+          label: `${s.participantName}: come-back ~${s.comeBack.extraM}m`,
+          color: s.color,
+          atMs: s.comeBack.atMs,
+        });
+      }
+      for (const d of s.detours ?? []) {
+        marks.push({
+          key: `d-${s.participantId}-${d.startMs}`,
+          lat: d.lat,
+          lon: d.lon,
+          kind: "detour",
+          label: `${s.participantName}: detour ${d.maxDeviationM}m off best`,
+          color: s.color,
+          atMs: d.startMs,
+        });
+      }
     }
+    return marks;
+  }, [currentLeg, selected]);
+
+  const speedStoryMarks = useMemo(
+    () =>
+      storyMarkers
+        .filter((m) => m.atMs != null)
+        .map((m) => ({
+          key: m.key,
+          timeMs: m.atMs!,
+          kind: m.kind,
+          label: m.label,
+          color: m.color,
+        })),
+    [storyMarkers]
+  );
+
+  const legFocusBounds = useMemo(() => {
+    if (!currentLegCtrl) return null;
 
     const pts: { lat: number; lon: number }[] = [
-      { lat: from.lat, lon: from.lon },
-      { lat: to.lat, lon: to.lon },
+      currentLegCtrl.from,
+      currentLegCtrl.to,
     ];
 
     for (const t of syncedTracks) {
-      // Prefer followed runner's corridor; else all selected
       if (followRunnerId) {
         if (t.participant.id !== followRunnerId) continue;
       } else if (!selected[t.participant.id]) {
         continue;
       }
-      const fromIdx = findPunchIndex(t.syncedPoints, {
-        lat: from.lat,
-        lon: from.lon,
-      });
-      if (fromIdx < 0) continue;
-      const toIdx = findPunchIndex(
+      const seg = legSegmentPoints(
         t.syncedPoints,
-        { lat: to.lat, lon: to.lon },
-        fromIdx + 1
+        currentLegCtrl.from,
+        currentLegCtrl.to
       );
-      if (toIdx <= fromIdx) continue;
-      const step = Math.max(1, Math.floor((toIdx - fromIdx) / 40));
-      for (let i = fromIdx; i <= toIdx; i += step) {
-        pts.push(t.syncedPoints[i]);
+      if (!seg?.length) continue;
+      const step = Math.max(1, Math.floor(seg.length / 40));
+      for (let i = 0; i < seg.length; i += step) {
+        pts.push(seg[i]);
       }
-      pts.push(t.syncedPoints[toIdx]);
+      pts.push(seg[seg.length - 1]);
     }
 
     const lats = pts.map((p) => p.lat);
@@ -328,7 +463,7 @@ export default function SessionWorkspace({
       [Math.min(...lats), Math.min(...lons)],
       [Math.max(...lats), Math.max(...lons)],
     ] as [[number, number], [number, number]];
-  }, [currentLeg, controls, syncedTracks, selected, followRunnerId]);
+  }, [currentLegCtrl, syncedTracks, selected, followRunnerId]);
 
   const speedControlMarks = useMemo(() => {
     return [...controls]
@@ -418,7 +553,7 @@ export default function SessionWorkspace({
 
       {!mapFullscreen && (
       <div
-        className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-[minmax(280px,380px)_1fr_minmax(240px,300px)]"
+        className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-[minmax(260px,340px)_1fr_minmax(300px,400px)]"
       >
         <aside
           className={`border-r border-forest-200 bg-white/70 overflow-auto p-3 space-y-3 ${
@@ -697,6 +832,8 @@ export default function SessionWorkspace({
                   color: t.participant.color,
                   points: t.syncedPoints,
                 }))}
+              legTracks={legTracks}
+              storyMarkers={storyMarkers}
               replayMs={replayMs}
               highlightLeg={
                 currentLeg
@@ -798,6 +935,7 @@ export default function SessionWorkspace({
                 timeMax={timeRange.max}
                 replayMs={replayMs}
                 controls={speedControlMarks}
+                storyMarks={speedStoryMarks}
                 onSeek={(t) => {
                   setPlaying(false);
                   setReplayMs(t);
@@ -808,95 +946,258 @@ export default function SessionWorkspace({
         </div>
 
         <aside
-          className={`border-l border-forest-200 bg-white/70 overflow-auto p-3 space-y-3 ${
-            mobileTab === "splits" ? "block" : "hidden"
-          } lg:block`}
+          className={`border-l border-forest-200 bg-white/70 min-h-0 ${
+            mobileTab === "splits"
+              ? "flex flex-col overflow-hidden"
+              : "hidden"
+          } lg:flex lg:flex-col lg:overflow-auto`}
         >
-          <h2 className="text-xs font-semibold uppercase tracking-wider text-forest-600">
-            Leg analysis
-          </h2>
-          {analysis.legs.length === 0 ? (
-            <p className="text-sm text-forest-600">
-              {initialTracks.some((t) => t.points.length > 0)
-                ? "Tracks are ready. Add controls with GPS to see leg splits. Replay works without controls."
-                : "Upload GPX tracks to overlay routes. Map image is optional."}
-            </p>
-          ) : (
-            <>
-              <select
-                className="w-full rounded-lg border border-forest-200 px-2 py-1.5 text-sm"
-                value={legIndex}
-                onChange={(e) => setLegIndex(Number(e.target.value))}
-              >
-                {analysis.legs.map((leg, i) => (
-                  <option key={i} value={i}>
-                    {leg.fromCode} → {leg.toCode}
-                  </option>
-                ))}
-              </select>
+          {/* Mobile: leg corridor map + zoomed replay */}
+          {mobileTab === "splits" && analysis.legs.length > 0 && (
+            <div className="lg:hidden shrink-0 flex flex-col border-b border-forest-200 bg-forest-50">
+              <div className="relative h-[34dvh] min-h-[180px] max-h-[300px]">
+                <SessionMap
+                  bounds={legFocusBounds ?? bounds}
+                  focusBounds={legFocusBounds}
+                  mapUrl={map ? `/api/maps/${event.id}` : null}
+                  mapAffine={affine}
+                  mapWidth={map?.width ?? 0}
+                  mapHeight={map?.height ?? 0}
+                  controls={controls}
+                  tracks={syncedTracks
+                    .filter((t) => selected[t.participant.id])
+                    .map((t) => ({
+                      id: t.participant.id,
+                      name: t.participant.name,
+                      color: t.participant.color,
+                      points: t.syncedPoints,
+                    }))}
+                  legTracks={legTracks}
+                  storyMarkers={storyMarkers}
+                  replayMs={replayMs}
+                  highlightLeg={
+                    currentLeg
+                      ? { fromSeq: currentLeg.fromSeq, toSeq: currentLeg.toSeq }
+                      : null
+                  }
+                  resizeToken={`splits-${mobileTab}-${legIndex}`}
+                  mapOpacity={map?.opacity ?? 0.55}
+                />
+              </div>
+              <div className="bg-white/95 px-3 py-2 space-y-1.5 border-t border-forest-100">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <button
+                    type="button"
+                    onClick={() => setPlaying((p) => !p)}
+                    className="rounded-lg bg-forest-700 text-white px-3 py-1.5 text-sm font-medium min-w-[72px]"
+                  >
+                    {playing ? "Pause" : "Play"}
+                  </button>
+                  <select
+                    value={playbackSpeed}
+                    onChange={(e) => setPlaybackSpeed(Number(e.target.value))}
+                    className="rounded-lg border border-forest-200 bg-white px-2 py-1.5 text-sm font-mono"
+                    aria-label="Playback speed"
+                  >
+                    {PLAYBACK_SPEEDS.map((s) => (
+                      <option key={s} value={s}>
+                        {s}×
+                      </option>
+                    ))}
+                  </select>
+                  <span className="font-mono text-xs text-forest-800 tabular-nums">
+                    {formatSplitTime(relMs)}
+                    <span className="text-forest-400"> / </span>
+                    {formatSplitTime(duration)}
+                  </span>
+                  {legTimeRange && (
+                    <span className="text-[10px] uppercase tracking-wide text-forest-500 ml-auto">
+                      Leg window
+                    </span>
+                  )}
+                </div>
+                <input
+                  type="range"
+                  min={playbackRange.min}
+                  max={playbackRange.max}
+                  step={100}
+                  value={Math.min(
+                    playbackRange.max,
+                    Math.max(playbackRange.min, replayMs)
+                  )}
+                  onChange={(e) => {
+                    setPlaying(false);
+                    setReplayMs(Number(e.target.value));
+                  }}
+                  className="w-full accent-forest-700"
+                  aria-label="Leg timeline"
+                />
+              </div>
+            </div>
+          )}
 
-              {currentLeg && (
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="text-left text-xs text-forest-500 border-b border-forest-200">
-                      <th className="py-1 pr-2">#</th>
-                      <th className="py-1 pr-2">Runner</th>
-                      <th className="py-1 pr-2">Time</th>
-                      <th className="py-1 pr-2">Pace</th>
-                      <th className="py-1 pr-2">Dist</th>
-                      <th className="py-1">Climb</th>
-                    </tr>
-                  </thead>
-                  <tbody>
+          <div className="flex-1 min-h-0 overflow-auto p-3 space-y-3">
+            <h2 className="text-xs font-semibold uppercase tracking-wider text-forest-600">
+              Leg analysis
+            </h2>
+            {analysis.legs.length === 0 ? (
+              <p className="text-sm text-forest-600">
+                {initialTracks.some((t) => t.points.length > 0)
+                  ? "Tracks are ready. Add controls with GPS to see leg splits. Replay works without controls."
+                  : "Upload GPX tracks to overlay routes. Map image is optional."}
+              </p>
+            ) : (
+              <>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    aria-label="Previous leg"
+                    disabled={legIndex <= 0}
+                    onClick={() => setLegIndex((i) => Math.max(0, i - 1))}
+                    className="shrink-0 w-9 h-9 rounded-lg border border-forest-200 bg-white text-forest-800 text-lg leading-none disabled:opacity-35 disabled:pointer-events-none hover:bg-forest-50"
+                  >
+                    ‹
+                  </button>
+                  <select
+                    className="min-w-0 flex-1 rounded-lg border border-forest-200 px-2 py-2 text-sm"
+                    value={legIndex}
+                    onChange={(e) => setLegIndex(Number(e.target.value))}
+                    aria-label="Select leg"
+                  >
+                    {analysis.legs.map((leg, i) => (
+                      <option key={i} value={i}>
+                        {leg.fromCode} → {leg.toCode}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    aria-label="Next leg"
+                    disabled={legIndex >= analysis.legs.length - 1}
+                    onClick={() =>
+                      setLegIndex((i) =>
+                        Math.min(analysis.legs.length - 1, i + 1)
+                      )
+                    }
+                    className="shrink-0 w-9 h-9 rounded-lg border border-forest-200 bg-white text-forest-800 text-lg leading-none disabled:opacity-35 disabled:pointer-events-none hover:bg-forest-50"
+                  >
+                    ›
+                  </button>
+                </div>
+
+                {currentLeg && (
+                  <div className="space-y-2">
                     {currentLeg.splits.map((s, rank) => {
                       const pace = formatLegPace(s.timeMs, s.distanceM);
                       const medal = medalForRank(rank, s.timeMs != null);
+                      const hesMs = (s.hesitations ?? []).reduce(
+                        (sum, h) => sum + h.durationMs,
+                        0
+                      );
+                      const extraDist = isExtraDistanceFlag(s.vsBest);
+                      const notableCb = isNotableComeBack(s.comeBack);
                       return (
-                      <tr
-                        key={s.participantId}
-                        className="border-b border-forest-100"
-                      >
-                        <td className="py-1.5 pr-2 font-mono text-forest-500 whitespace-nowrap">
-                          {s.timeMs != null ? (
-                            <>
-                              {medal ? `${medal} ` : ""}
-                              {rank + 1}
-                            </>
-                          ) : (
-                            "—"
+                        <div
+                          key={s.participantId}
+                          className="rounded-lg border border-forest-100 bg-white/80 px-2.5 py-2"
+                        >
+                          <div className="flex items-baseline gap-2 min-w-0">
+                            <span className="font-mono text-xs text-forest-500 tabular-nums shrink-0 w-8">
+                              {s.timeMs != null
+                                ? `${medal ? `${medal} ` : ""}${rank + 1}`
+                                : "—"}
+                            </span>
+                            <span className="min-w-0 flex-1 truncate text-sm font-medium text-forest-900">
+                              <span
+                                className="inline-block w-2 h-2 rounded-full mr-1.5 align-middle"
+                                style={{ background: s.color }}
+                              />
+                              {s.participantName}
+                            </span>
+                            <span className="font-mono text-sm tabular-nums text-forest-900 shrink-0">
+                              {formatSplitTime(s.timeMs)}
+                            </span>
+                          </div>
+
+                          <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 pl-7 text-[11px] font-mono text-forest-600 tabular-nums">
+                            <span>{pace ? `${pace}/km` : "—"}</span>
+                            <span>
+                              {s.distanceM != null
+                                ? `${Math.round(s.distanceM)}\u00a0m`
+                                : "—"}
+                            </span>
+                            <span>
+                              {s.climbM != null
+                                ? `↑${Math.round(s.climbM)}\u00a0m`
+                                : "—"}
+                            </span>
+                          </div>
+
+                          {(hesMs > 0 ||
+                            notableCb ||
+                            extraDist ||
+                            (s.detours?.length ?? 0) > 0) && (
+                            <div className="mt-1.5 flex flex-wrap gap-1 pl-7">
+                              {hesMs > 0 && (
+                                <span
+                                  className="rounded px-1.5 py-0.5 text-[10px] font-medium bg-amber-100 text-amber-900 leading-none"
+                                  title="Total hesitation on this leg"
+                                >
+                                  hes {Math.round(hesMs / 1000)}s
+                                </span>
+                              )}
+                              {notableCb && s.comeBack && (
+                                <span
+                                  className="rounded px-1.5 py-0.5 text-[10px] font-medium bg-violet-100 text-violet-900 leading-none"
+                                  title="Unique come-back vs peers (fastest did not)"
+                                >
+                                  come-back +{s.comeBack.extraM}m
+                                </span>
+                              )}
+                              {extraDist && s.vsBest && (
+                                <span
+                                  className="rounded px-1.5 py-0.5 text-[10px] font-medium bg-rose-100 text-rose-900 leading-none"
+                                  title={`vs ${s.vsBest.anchorName}`}
+                                >
+                                  ×{s.vsBest.distanceRatio.toFixed(2)} dist
+                                </span>
+                              )}
+                              {(s.detours?.length ?? 0) > 0 && (
+                                <span
+                                  className="rounded px-1.5 py-0.5 text-[10px] font-medium bg-purple-100 text-purple-900 leading-none"
+                                  title="Off the fastest runner's corridor"
+                                >
+                                  detour
+                                </span>
+                              )}
+                            </div>
                           )}
-                        </td>
-                        <td className="py-1.5 pr-2">
-                          <span
-                            className="inline-block w-2 h-2 rounded-full mr-1.5"
-                            style={{ background: s.color }}
-                          />
-                          {s.participantName}
-                        </td>
-                        <td className="py-1.5 pr-2 font-mono">
-                          {formatSplitTime(s.timeMs)}
-                        </td>
-                        <td className="py-1.5 pr-2 font-mono text-forest-700">
-                          {pace ? `${pace}/km` : "—"}
-                        </td>
-                        <td className="py-1.5 pr-2 font-mono">
-                          {s.distanceM != null
-                            ? `${Math.round(s.distanceM)} m`
-                            : "—"}
-                        </td>
-                        <td className="py-1.5 font-mono">
-                          {s.climbM != null
-                            ? `${Math.round(s.climbM)} m`
-                            : "—"}
-                        </td>
-                      </tr>
+
+                          {s.vsBest && (
+                            <div
+                              className="mt-1 pl-7 text-[10px] text-forest-500 font-mono truncate"
+                              title={`vs ${s.vsBest.anchorName}: ${formatSignedDuration(s.vsBest.timeLossMs)}, ${
+                                s.vsBest.distanceRatio >= 1
+                                  ? `+${Math.round((s.vsBest.distanceRatio - 1) * 100)}%`
+                                  : `${Math.round((s.vsBest.distanceRatio - 1) * 100)}%`
+                              } dist`}
+                            >
+                              vs {s.vsBest.anchorName} (
+                              {formatSignedDuration(s.vsBest.timeLossMs)},{" "}
+                              {s.vsBest.distanceRatio >= 1
+                                ? `+${Math.round((s.vsBest.distanceRatio - 1) * 100)}%`
+                                : `${Math.round((s.vsBest.distanceRatio - 1) * 100)}%`}{" "}
+                              dist)
+                            </div>
+                          )}
+                        </div>
                       );
                     })}
-                  </tbody>
-                </table>
-              )}
-            </>
-          )}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
         </aside>
       </div>
       )}
@@ -920,6 +1221,8 @@ export default function SessionWorkspace({
                   color: t.participant.color,
                   points: t.syncedPoints,
                 }))}
+              legTracks={legTracks}
+              storyMarkers={storyMarkers}
               replayMs={replayMs}
               highlightLeg={
                 currentLeg

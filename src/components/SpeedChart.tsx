@@ -25,6 +25,14 @@ export interface SpeedChartControl {
   lon: number;
 }
 
+export interface SpeedChartStoryMark {
+  key: string;
+  timeMs: number;
+  kind: "hesitation" | "comeback" | "detour";
+  label: string;
+  color: string;
+}
+
 interface PunchDot {
   key: string;
   runnerId: string;
@@ -45,11 +53,19 @@ interface Props {
   onSeek: (t: number) => void;
   /** Course controls with GPS — punches drawn on every runner's line */
   controls?: SpeedChartControl[];
+  /** Hesitation / decision markers (seekable) */
+  storyMarks?: SpeedChartStoryMark[];
 }
 
 const W = 600;
 const H = 88;
 const PAD = { top: 8, right: 8, bottom: 4, left: 28 };
+
+const STORY_FILL = {
+  hesitation: "#d97706",
+  comeback: "#7c3aed",
+  detour: "#6d28d9",
+} as const;
 
 export default function SpeedChart({
   runners,
@@ -58,6 +74,7 @@ export default function SpeedChart({
   replayMs,
   onSeek,
   controls = [],
+  storyMarks = [],
 }: Props) {
   const svgRef = useRef<SVGSVGElement>(null);
   const duration = Math.max(1, timeMax - timeMin);
@@ -294,6 +311,52 @@ export default function SpeedChart({
           </g>
         ))}
 
+        {/* Hesitation / come-back / detour ticks */}
+        {storyMarks
+          .filter((m) => m.timeMs >= timeMin && m.timeMs <= timeMax)
+          .map((m) => {
+            const x = xScale(m.timeMs);
+            const fill = STORY_FILL[m.kind];
+            return (
+              <g
+                key={m.key}
+                data-punch
+                className="cursor-pointer"
+                onPointerDown={(e) => {
+                  e.stopPropagation();
+                  onSeek(m.timeMs);
+                  setTip({
+                    code: m.label,
+                    runnerName: "",
+                    x,
+                    y: PAD.top + 6,
+                  });
+                }}
+              >
+                <line
+                  x1={x}
+                  x2={x}
+                  y1={PAD.top}
+                  y2={H - PAD.bottom}
+                  stroke={fill}
+                  strokeWidth={1}
+                  strokeDasharray="2 2"
+                  opacity={0.7}
+                />
+                <circle
+                  cx={x}
+                  cy={PAD.top + 4}
+                  r={3}
+                  fill={fill}
+                  stroke="#fff"
+                  strokeWidth={1}
+                >
+                  <title>{m.label}</title>
+                </circle>
+              </g>
+            );
+          })}
+
         <line
           x1={playheadX}
           x2={playheadX}
@@ -315,7 +378,9 @@ export default function SpeedChart({
           }}
         >
           <span className="font-bold">{tip.code}</span>
-          <span className="opacity-80"> · {tip.runnerName}</span>
+          {tip.runnerName ? (
+            <span className="opacity-80"> · {tip.runnerName}</span>
+          ) : null}
         </div>
       )}
     </div>

@@ -1,6 +1,13 @@
 import { pathClimbM, pathDistanceM } from "./gpx";
 import { mpsToPaceMinPerKm } from "./speed";
-import { applyOffset, computeReferenceSync, findPunchIndex } from "./sync";
+import {
+  applyOffset,
+  computeReferenceSync,
+  findPunchIndex,
+  legSegmentIndices,
+} from "./sync";
+import { detectHesitations } from "./hesitation";
+import { applyDecisionQuality } from "./decisionQuality";
 import type {
   AnalysisPayload,
   ControlRow,
@@ -51,33 +58,36 @@ export function analyzeEvent(
   for (let i = 0; i < sorted.length - 1; i++) {
     const from = sorted[i];
     const to = sorted[i + 1];
+    const fromCtrl = { lat: from.lat!, lon: from.lon! };
+    const toCtrl = { lat: to.lat!, lon: to.lon! };
     const splits: LegSplit[] = [];
+    const segments: Record<string, TrackPoint[]> = {};
 
     for (const { runner, points } of synced) {
-      const fromIdx = findPunchIndex(points, {
-        lat: from.lat!,
-        lon: from.lon!,
-      });
-      let toIdx = -1;
-      if (fromIdx >= 0) {
-        toIdx = findPunchIndex(
-          points,
-          { lat: to.lat!, lon: to.lon! },
-          fromIdx + 1
-        );
-      }
-
-      const punchedFrom = fromIdx >= 0;
-      const punchedTo = toIdx >= 0;
+      const idx = legSegmentIndices(points, fromCtrl, toCtrl);
+      let punchedFrom = false;
+      let punchedTo = false;
       let timeMs: number | null = null;
       let distanceM: number | null = null;
       let climbM: number | null = null;
+      let hesitations = undefined as ReturnType<typeof detectHesitations> | undefined;
 
-      if (punchedFrom && punchedTo && toIdx > fromIdx) {
-        const segment = points.slice(fromIdx, toIdx + 1);
-        timeMs = points[toIdx].time - points[fromIdx].time;
+      if (idx) {
+        punchedFrom = true;
+        punchedTo = true;
+        const segment = points.slice(idx.fromIdx, idx.toIdx + 1);
+        segments[runner.participant.id] = segment;
+        timeMs = points[idx.toIdx].time - points[idx.fromIdx].time;
         distanceM = pathDistanceM(segment);
         climbM = pathClimbM(segment);
+        const h = detectHesitations(segment);
+        if (h.length) hesitations = h;
+      } else {
+        const fromIdx = findPunchIndex(points, fromCtrl);
+        punchedFrom = fromIdx >= 0;
+        if (punchedFrom) {
+          punchedTo = findPunchIndex(points, toCtrl, fromIdx + 1) >= 0;
+        }
       }
 
       splits.push({
@@ -93,8 +103,11 @@ export function analyzeEvent(
         climbM,
         punchedFrom,
         punchedTo,
+        hesitations,
       });
     }
+
+    applyDecisionQuality(splits, segments, toCtrl);
 
     splits.sort((a, b) => {
       if (a.timeMs == null && b.timeMs == null) return 0;

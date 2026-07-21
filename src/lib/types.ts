@@ -124,6 +124,42 @@ export interface AnalysisCacheRow {
   updated_at: string;
 }
 
+export interface HesitationEvent {
+  startMs: number;
+  endMs: number;
+  durationMs: number;
+  lat: number;
+  lon: number;
+}
+
+export interface ComeBackEvent {
+  atMs: number;
+  lat: number;
+  lon: number;
+  /** Estimated wasted out-and-back meters */
+  extraM: number;
+  /**
+   * Peer rating: only set when this retour is an outlier
+   * (fastest did not, exactly one runner did, and they paid extra meters).
+   */
+  rating?: "outlier";
+}
+
+export interface VsBestInfo {
+  anchorParticipantId: string;
+  anchorName: string;
+  distanceRatio: number;
+  timeLossMs: number;
+}
+
+export interface DetourEvent {
+  startMs: number;
+  endMs: number;
+  lat: number;
+  lon: number;
+  maxDeviationM: number;
+}
+
 export interface LegSplit {
   participantId: string;
   participantName: string;
@@ -137,6 +173,10 @@ export interface LegSplit {
   climbM: number | null;
   punchedFrom: boolean;
   punchedTo: boolean;
+  hesitations?: HesitationEvent[];
+  comeBack?: ComeBackEvent;
+  vsBest?: VsBestInfo;
+  detours?: DetourEvent[];
 }
 
 export interface AnalysisPayload {

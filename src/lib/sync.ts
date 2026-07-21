@@ -3,6 +3,32 @@ import type { ControlRow, SyncStrategy, TrackPoint } from "./types";
 
 export const PUNCH_RADIUS_M = 25;
 
+/** Punch indices for a leg (from → to). Null if either punch missing. */
+export function legSegmentIndices(
+  points: TrackPoint[],
+  fromCtrl: { lat: number; lon: number },
+  toCtrl: { lat: number; lon: number },
+  radiusM = PUNCH_RADIUS_M
+): { fromIdx: number; toIdx: number } | null {
+  const fromIdx = findPunchIndex(points, fromCtrl, 0, radiusM);
+  if (fromIdx < 0) return null;
+  const toIdx = findPunchIndex(points, toCtrl, fromIdx + 1, radiusM);
+  if (toIdx < 0 || toIdx <= fromIdx) return null;
+  return { fromIdx, toIdx };
+}
+
+/** Inclusive slice of points between from/to punches. */
+export function legSegmentPoints(
+  points: TrackPoint[],
+  fromCtrl: { lat: number; lon: number },
+  toCtrl: { lat: number; lon: number },
+  radiusM = PUNCH_RADIUS_M
+): TrackPoint[] | null {
+  const idx = legSegmentIndices(points, fromCtrl, toCtrl, radiusM);
+  if (!idx) return null;
+  return points.slice(idx.fromIdx, idx.toIdx + 1);
+}
+
 export function findPunchIndex(
   points: TrackPoint[],
   control: { lat: number; lon: number },
