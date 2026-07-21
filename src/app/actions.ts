@@ -10,6 +10,7 @@ import {
   renameParticipant,
   replaceControls,
   saveGeoref,
+  saveMapOpacity,
   setManualDelta,
   setParticipantSyncStrategy,
   setReferenceParticipant,
@@ -48,6 +49,12 @@ export async function actionUpdateEventMeta(formData: FormData) {
 
 export async function actionSaveGeoref(eventId: string, pairs: GeorefPair[]) {
   saveGeoref(eventId, pairs);
+  revalidatePath(`/events/${eventId}/setup`);
+  revalidatePath(`/events/${eventId}`);
+}
+
+export async function actionSaveMapOpacity(eventId: string, opacity: number) {
+  saveMapOpacity(eventId, opacity);
   revalidatePath(`/events/${eventId}/setup`);
   revalidatePath(`/events/${eventId}`);
 }

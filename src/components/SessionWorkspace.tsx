@@ -16,7 +16,7 @@ import { SYNC_STRATEGY_LABELS } from "@/lib/types";
 import { fitAffine, imageOverlayBounds } from "@/lib/georef";
 import { DEFAULT_MAP_BOUNDS } from "@/lib/geoDefaults";
 import { applyOffset, computeReferenceSync, findPunchIndex } from "@/lib/sync";
-import { formatSplitTime, formatWallTime, formatSignedDuration, parseSignedDurationToSec } from "@/lib/analysis";
+import { formatSplitTime, formatWallTime, formatSignedDuration, parseSignedDurationToSec, formatLegPace, medalForRank } from "@/lib/analysis";
 import {
   actionDeleteParticipant,
   actionRenameParticipant,
@@ -59,6 +59,7 @@ export default function SessionWorkspace({
   const [playing, setPlaying] = useState(false);
   const [replayMs, setReplayMs] = useState(0);
   const [playbackSpeed, setPlaybackSpeed] = useState(10);
+  const [followRunnerId, setFollowRunnerId] = useState<string>("");
   const [uploadStatus, setUploadStatus] = useState("");
   const [mobileTab, setMobileTab] = useState<"map" | "runners" | "splits">(
     "map"
@@ -224,6 +225,58 @@ export default function SessionWorkspace({
   const duration = timeRange.max - timeRange.min;
   const relMs = replayMs - timeRange.min;
 
+  // Follow mode: advance leg when the followed runner punches the next control
+  useEffect(() => {
+    if (!followRunnerId || analysis.legs.length === 0) return;
+    const track = syncedTracks.find(
+      (t) => t.participant.id === followRunnerId
+    );
+    if (!track?.syncedPoints.length) return;
+
+    const geo = [...controls]
+      .filter((c) => c.lat != null && c.lon != null)
+      .sort((a, b) => a.sequence - b.sequence);
+    if (geo.length < 2) return;
+
+    const punchTimeBySeq = new Map<number, number>();
+    let fromIdx = 0;
+    for (const c of geo) {
+      const idx = findPunchIndex(
+        track.syncedPoints,
+        { lat: c.lat!, lon: c.lon! },
+        fromIdx
+      );
+      if (idx < 0) continue;
+      punchTimeBySeq.set(c.sequence, track.syncedPoints[idx].time);
+      fromIdx = idx + 1;
+    }
+
+    let active = 0;
+    for (let i = 0; i < analysis.legs.length; i++) {
+      const leg = analysis.legs[i];
+      const tFrom = punchTimeBySeq.get(leg.fromSeq);
+      const tTo = punchTimeBySeq.get(leg.toSeq);
+      if (tFrom == null) continue;
+      if (replayMs < tFrom) {
+        active = i;
+        break;
+      }
+      if (tTo == null || replayMs < tTo) {
+        active = i;
+        break;
+      }
+      active = Math.min(i + 1, analysis.legs.length - 1);
+    }
+
+    setLegIndex((prev) => (prev === active ? prev : active));
+  }, [
+    followRunnerId,
+    replayMs,
+    analysis.legs,
+    syncedTracks,
+    controls,
+  ]);
+
   const legFocusBounds = useMemo(() => {
     if (!currentLeg) return null;
     const from = controls.find((c) => c.sequence === currentLeg.fromSeq);
@@ -245,7 +298,12 @@ export default function SessionWorkspace({
     ];
 
     for (const t of syncedTracks) {
-      if (!selected[t.participant.id]) continue;
+      // Prefer followed runner's corridor; else all selected
+      if (followRunnerId) {
+        if (t.participant.id !== followRunnerId) continue;
+      } else if (!selected[t.participant.id]) {
+        continue;
+      }
       const fromIdx = findPunchIndex(t.syncedPoints, {
         lat: from.lat,
         lon: from.lon,
@@ -270,7 +328,7 @@ export default function SessionWorkspace({
       [Math.min(...lats), Math.min(...lons)],
       [Math.max(...lats), Math.max(...lons)],
     ] as [[number, number], [number, number]];
-  }, [currentLeg, controls, syncedTracks, selected]);
+  }, [currentLeg, controls, syncedTracks, selected, followRunnerId]);
 
   const speedControlMarks = useMemo(() => {
     return [...controls]
@@ -646,6 +704,7 @@ export default function SessionWorkspace({
                   : null
               }
               resizeToken={`${mobileTab}-${mapFullscreen}`}
+              mapOpacity={map?.opacity ?? 0.55}
             />
             <button
               type="button"
@@ -679,6 +738,25 @@ export default function SessionWorkspace({
                   {PLAYBACK_SPEEDS.map((s) => (
                     <option key={s} value={s}>
                       {s}×
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="flex items-center gap-1.5 text-sm text-forest-700">
+                <span className="text-[10px] uppercase tracking-wide text-forest-500 hidden sm:inline">
+                  Follow
+                </span>
+                <select
+                  value={followRunnerId}
+                  onChange={(e) => setFollowRunnerId(e.target.value)}
+                  className="rounded-lg border border-forest-200 bg-white px-2 py-1.5 text-sm max-w-[140px]"
+                  aria-label="Follow runner"
+                  title="Map gently focuses each leg as this runner punches"
+                >
+                  <option value="">Off</option>
+                  {syncedTracks.map((t) => (
+                    <option key={t.participant.id} value={t.participant.id}>
+                      {t.participant.name}
                     </option>
                   ))}
                 </select>
@@ -764,18 +842,29 @@ export default function SessionWorkspace({
                       <th className="py-1 pr-2">#</th>
                       <th className="py-1 pr-2">Runner</th>
                       <th className="py-1 pr-2">Time</th>
+                      <th className="py-1 pr-2">Pace</th>
                       <th className="py-1 pr-2">Dist</th>
                       <th className="py-1">Climb</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {currentLeg.splits.map((s, rank) => (
+                    {currentLeg.splits.map((s, rank) => {
+                      const pace = formatLegPace(s.timeMs, s.distanceM);
+                      const medal = medalForRank(rank, s.timeMs != null);
+                      return (
                       <tr
                         key={s.participantId}
                         className="border-b border-forest-100"
                       >
-                        <td className="py-1.5 pr-2 font-mono text-forest-500">
-                          {s.timeMs != null ? rank + 1 : "—"}
+                        <td className="py-1.5 pr-2 font-mono text-forest-500 whitespace-nowrap">
+                          {s.timeMs != null ? (
+                            <>
+                              {medal ? `${medal} ` : ""}
+                              {rank + 1}
+                            </>
+                          ) : (
+                            "—"
+                          )}
                         </td>
                         <td className="py-1.5 pr-2">
                           <span
@@ -786,6 +875,9 @@ export default function SessionWorkspace({
                         </td>
                         <td className="py-1.5 pr-2 font-mono">
                           {formatSplitTime(s.timeMs)}
+                        </td>
+                        <td className="py-1.5 pr-2 font-mono text-forest-700">
+                          {pace ? `${pace}/km` : "—"}
                         </td>
                         <td className="py-1.5 pr-2 font-mono">
                           {s.distanceM != null
@@ -798,7 +890,8 @@ export default function SessionWorkspace({
                             : "—"}
                         </td>
                       </tr>
-                    ))}
+                      );
+                    })}
                   </tbody>
                 </table>
               )}
@@ -834,6 +927,7 @@ export default function SessionWorkspace({
                   : null
               }
               resizeToken={`fs-${mapFullscreen}`}
+              mapOpacity={map?.opacity ?? 0.55}
             />
             <button
               type="button"
@@ -861,6 +955,19 @@ export default function SessionWorkspace({
                 {PLAYBACK_SPEEDS.map((s) => (
                   <option key={s} value={s}>
                     {s}×
+                  </option>
+                ))}
+              </select>
+              <select
+                value={followRunnerId}
+                onChange={(e) => setFollowRunnerId(e.target.value)}
+                className="rounded-lg border border-forest-200 bg-white px-2 py-2 text-sm max-w-[140px]"
+                aria-label="Follow runner"
+              >
+                <option value="">Follow: Off</option>
+                {syncedTracks.map((t) => (
+                  <option key={t.participant.id} value={t.participant.id}>
+                    {t.participant.name}
                   </option>
                 ))}
               </select>

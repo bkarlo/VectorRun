@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import Link from "next/link";
 import type { GeorefPair, TrackPoint } from "@/lib/types";
-import { actionSaveGeoref, actionSaveControls } from "@/app/actions";
+import { actionSaveGeoref, actionSaveControls, actionSaveMapOpacity } from "@/app/actions";
 import { fitAffine, gpsToMap } from "@/lib/georef";
 import { trackTouchesControl } from "@/lib/sync";
 
@@ -37,6 +37,7 @@ interface Props {
   initialGeoref: GeorefPair[];
   initialControls: ControlDraft[];
   tracks: SetupTrack[];
+  initialMapOpacity?: number;
 }
 
 type Mode = "place" | "points" | "controls";
@@ -65,6 +66,10 @@ export default function SetupWizard(props: Props) {
   const [pendingGps, setPendingGps] = useState({ lat: "", lon: "" });
   const [focusCodeIndex, setFocusCodeIndex] = useState<number | null>(null);
   const [gpxStatus, setGpxStatus] = useState("");
+  const [sessionMapOpacity, setSessionMapOpacity] = useState(
+    props.initialMapOpacity ?? 0.55
+  );
+  const [opacityStatus, setOpacityStatus] = useState("");
   const imgRef = useRef<HTMLImageElement>(null);
   const codeInputRefs = useRef<(HTMLInputElement | null)[]>([]);
 
@@ -256,6 +261,52 @@ export default function SetupWizard(props: Props) {
           )}
         </div>
       </div>
+
+      {mapUrl && (
+        <div className="panel rounded-xl p-4 flex flex-wrap items-center gap-3">
+          <div className="min-w-0">
+            <h3 className="font-display text-base text-forest-900">
+              Session map opacity
+            </h3>
+            <p className="text-xs text-forest-600">
+              How strong the orienteering map appears in the session view
+              (tracks stay on top).
+            </p>
+          </div>
+          <label className="flex items-center gap-2 text-sm text-forest-700 ml-auto">
+            <input
+              type="range"
+              min={0.15}
+              max={0.9}
+              step={0.05}
+              value={sessionMapOpacity}
+              onChange={(e) =>
+                setSessionMapOpacity(parseFloat(e.target.value))
+              }
+              className="w-36"
+            />
+            <span className="font-mono text-xs w-8">
+              {Math.round(sessionMapOpacity * 100)}%
+            </span>
+          </label>
+          <button
+            type="button"
+            className="rounded-lg bg-forest-700 text-white px-3 py-1.5 text-sm font-medium"
+            onClick={() => {
+              void actionSaveMapOpacity(props.eventId, sessionMapOpacity).then(
+                () => setOpacityStatus("Saved")
+              );
+            }}
+          >
+            Save opacity
+          </button>
+          {opacityStatus && (
+            <span className="text-xs font-mono text-forest-600">
+              {opacityStatus}
+            </span>
+          )}
+        </div>
+      )}
 
       <div className="flex flex-wrap gap-2 items-center">
         <div className="flex rounded-lg border border-forest-200 overflow-hidden text-sm">

@@ -140,9 +140,17 @@ export function deleteEvent(id: string) {
 }
 
 export function getMap(eventId: string): MapRow | undefined {
-  return getDb()
+  const row = getDb()
     .prepare("SELECT * FROM maps WHERE event_id = ?")
     .get(eventId) as MapRow | undefined;
+  if (!row) return undefined;
+  return {
+    ...row,
+    opacity:
+      typeof row.opacity === "number" && Number.isFinite(row.opacity)
+        ? row.opacity
+        : 0.55,
+  };
 }
 
 export function saveMapImage(
@@ -179,6 +187,13 @@ export function saveGeoref(eventId: string, pairs: GeorefPair[]) {
   getDb()
     .prepare(`UPDATE maps SET georef_json = ? WHERE event_id = ?`)
     .run(JSON.stringify(pairs), eventId);
+}
+
+export function saveMapOpacity(eventId: string, opacity: number) {
+  const clamped = Math.min(0.95, Math.max(0.1, opacity));
+  getDb()
+    .prepare(`UPDATE maps SET opacity = ? WHERE event_id = ?`)
+    .run(clamped, eventId);
 }
 
 export function listControls(eventId: string): ControlRow[] {

@@ -85,6 +85,8 @@ export interface MapRow {
   width: number;
   height: number;
   georef_json: string;
+  /** Session overlay opacity 0–1 (placement UI has its own slider). */
+  opacity: number;
 }
 
 export interface ControlRow {

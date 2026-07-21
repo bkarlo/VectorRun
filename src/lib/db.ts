@@ -115,6 +115,13 @@ function migrate(database: Database.Database) {
     `);
   }
 
+  const mapCols = tableColumns(database, "maps");
+  if (!mapCols.has("opacity")) {
+    database.exec(
+      `ALTER TABLE maps ADD COLUMN opacity REAL NOT NULL DEFAULT 0.55`
+    );
+  }
+
   // Bump cache when sync semantics change
   const userVersion = Number(
     database.pragma("user_version", { simple: true }) ?? 0

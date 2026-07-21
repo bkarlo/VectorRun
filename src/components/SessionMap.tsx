@@ -70,6 +70,7 @@ interface Props {
   replayMs: number;
   highlightLeg: { fromSeq: number; toSeq: number } | null;
   resizeToken?: string | number;
+  mapOpacity?: number;
 }
 
 function FitBounds({
@@ -93,9 +94,19 @@ function FocusBounds({
   bounds: [[number, number], [number, number]] | null | undefined;
 }) {
   const map = useMap();
+  const lastKey = useRef<string>("");
   useEffect(() => {
     if (!bounds) return;
-    map.fitBounds(bounds, { padding: [48, 48], maxZoom: 17, animate: true });
+    const key = bounds.flat().map((n) => n.toFixed(6)).join(",");
+    if (key === lastKey.current) return;
+    lastKey.current = key;
+    // Gentle pan/zoom to the active leg — only when the segment changes
+    map.fitBounds(bounds, {
+      padding: [56, 56],
+      maxZoom: 16,
+      animate: true,
+      duration: 0.85,
+    });
   }, [map, bounds]);
   return null;
 }
@@ -159,6 +170,7 @@ export default function SessionMap({
   replayMs,
   highlightLeg,
   resizeToken,
+  mapOpacity = 0.55,
 }: Props) {
   const corners = useMemo(() => {
     if (!mapAffine || mapWidth <= 0 || mapHeight <= 0) return null;
@@ -199,7 +211,7 @@ export default function SessionMap({
           topLeft={corners.topLeft}
           topRight={corners.topRight}
           bottomLeft={corners.bottomLeft}
-          opacity={0.55}
+          opacity={mapOpacity}
         />
       )}
 

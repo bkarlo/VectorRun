@@ -1,4 +1,5 @@
 import { pathClimbM, pathDistanceM } from "./gpx";
+import { mpsToPaceMinPerKm } from "./speed";
 import { applyOffset, computeReferenceSync, findPunchIndex } from "./sync";
 import type {
   AnalysisPayload,
@@ -126,6 +127,26 @@ export function formatSplitTime(ms: number | null): string {
   const m = Math.floor(totalSec / 60);
   const s = totalSec % 60;
   return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+/** Pace min/km from leg time + distance; null if missing/invalid. */
+export function formatLegPace(
+  timeMs: number | null,
+  distanceM: number | null
+): string | null {
+  if (timeMs == null || distanceM == null || timeMs <= 0 || distanceM < 5) {
+    return null;
+  }
+  const mps = distanceM / (timeMs / 1000);
+  return mpsToPaceMinPerKm(mps);
+}
+
+export function medalForRank(rank: number, hasTime: boolean): string {
+  if (!hasTime) return "";
+  if (rank === 0) return "🥇";
+  if (rank === 1) return "🥈";
+  if (rank === 2) return "🥉";
+  return "";
 }
 
 /** Signed duration for sync Δ, e.g. "−4m 1s", "+12s", "0s". */

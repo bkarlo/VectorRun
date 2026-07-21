@@ -106,6 +106,7 @@ export default async function SetupPage({
             map_y: c.map_y,
           }))}
           tracks={tracks}
+          initialMapOpacity={map?.opacity ?? 0.55}
         />
       </div>
     </main>
