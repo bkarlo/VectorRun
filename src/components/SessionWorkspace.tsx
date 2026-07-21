@@ -12,12 +12,15 @@ import type {
   TrackPoint,
   TrackRow,
 } from "@/lib/types";
-import { SYNC_STRATEGY_LABELS } from "@/lib/types";
+import { SYNC_STRATEGY_HINTS, SYNC_STRATEGY_LABELS } from "@/lib/types";
 import { fitAffine, imageOverlayBounds } from "@/lib/georef";
 import { DEFAULT_MAP_BOUNDS } from "@/lib/geoDefaults";
 import {
   applyOffset,
+  computeRaceWindow,
   computeReferenceSync,
+  courseSegmentIndices,
+  courseSegmentPoints,
   findPunchIndex,
   legSegmentIndices,
   legSegmentPoints,
@@ -69,7 +72,7 @@ export default function SessionWorkspace({
     for (const t of initialTracks) s[t.participant.id] = true;
     return s;
   });
-  const [legIndex, setLegIndex] = useState(0);
+  const [analysisIndex, setAnalysisIndex] = useState(-1); // -1 = Overall S→F
   const [playing, setPlaying] = useState(false);
   const [replayMs, setReplayMs] = useState(0);
   const [playbackSpeed, setPlaybackSpeed] = useState(10);
@@ -138,7 +141,7 @@ export default function SessionWorkspace({
     controls,
   ]);
 
-  const timeRange = useMemo(() => {
+  const fullTimeRange = useMemo(() => {
     let min = Infinity;
     let max = -Infinity;
     for (const t of syncedTracks) {
@@ -151,12 +154,32 @@ export default function SessionWorkspace({
     return { min, max: Math.max(max, min + 1) };
   }, [syncedTracks, selected]);
 
-  const currentLeg = analysis.legs[legIndex];
+  const raceTimeRange = useMemo(() => {
+    if (event.race_window_enabled === false) return null;
+    const tracks = syncedTracks
+      .filter((t) => selected[t.participant.id] && t.syncedPoints.length > 0)
+      .map((t) => ({ points: t.syncedPoints }));
+    return computeRaceWindow(tracks, controls);
+  }, [syncedTracks, selected, controls, event.race_window_enabled]);
+
+  /** Map / fullscreen timeline: race window when enabled + punches, else full GPX. */
+  const mapTimeRange = raceTimeRange ?? fullTimeRange;
+
+  const hasOverall = analysis.overall != null;
+  const minAnalysisIndex = hasOverall ? -1 : 0;
+  const maxAnalysisIndex =
+    analysis.legs.length > 0
+      ? analysis.legs.length - 1
+      : minAnalysisIndex;
+  const viewingOverall = analysisIndex < 0 && hasOverall;
+  const currentView = viewingOverall
+    ? analysis.overall!
+    : analysis.legs[Math.max(0, analysisIndex)] ?? null;
 
   const currentLegCtrl = useMemo(() => {
-    if (!currentLeg) return null;
-    const from = controls.find((c) => c.sequence === currentLeg.fromSeq);
-    const to = controls.find((c) => c.sequence === currentLeg.toSeq);
+    if (!currentView) return null;
+    const from = controls.find((c) => c.sequence === currentView.fromSeq);
+    const to = controls.find((c) => c.sequence === currentView.toSeq);
     if (
       !from ||
       !to ||
@@ -171,20 +194,30 @@ export default function SessionWorkspace({
       from: { lat: from.lat, lon: from.lon },
       to: { lat: to.lat, lon: to.lon },
     };
-  }, [currentLeg, controls]);
+  }, [currentView, controls]);
 
-  /** Leg-zoomed window: earliest from-punch → latest to-punch among selected. */
-  const legTimeRange = useMemo(() => {
-    if (!currentLegCtrl) return null;
+  const courseCtrlPoints = useMemo(() => {
+    return [...controls]
+      .filter((c) => c.lat != null && c.lon != null)
+      .sort((a, b) => a.sequence - b.sequence)
+      .map((c) => ({ lat: c.lat!, lon: c.lon! }));
+  }, [controls]);
+
+  /** Zoomed window for current analysis view (overall or leg). */
+  const viewTimeRange = useMemo(() => {
     let minFrom = Infinity;
     let maxTo = -Infinity;
     for (const t of syncedTracks) {
       if (!selected[t.participant.id]) continue;
-      const idx = legSegmentIndices(
-        t.syncedPoints,
-        currentLegCtrl.from,
-        currentLegCtrl.to
-      );
+      const idx = viewingOverall
+        ? courseSegmentIndices(t.syncedPoints, courseCtrlPoints)
+        : currentLegCtrl
+          ? legSegmentIndices(
+              t.syncedPoints,
+              currentLegCtrl.from,
+              currentLegCtrl.to
+            )
+          : null;
       if (!idx) continue;
       minFrom = Math.min(minFrom, t.syncedPoints[idx.fromIdx].time);
       maxTo = Math.max(maxTo, t.syncedPoints[idx.toIdx].time);
@@ -193,21 +226,27 @@ export default function SessionWorkspace({
       return null;
     }
     return { min: minFrom, max: maxTo };
-  }, [currentLegCtrl, syncedTracks, selected]);
+  }, [
+    viewingOverall,
+    courseCtrlPoints,
+    currentLegCtrl,
+    syncedTracks,
+    selected,
+  ]);
 
   const splitsPlayback =
-    mobileTab === "splits" && legTimeRange != null;
-  const playbackRange = splitsPlayback ? legTimeRange! : timeRange;
+    mobileTab === "splits" && viewTimeRange != null;
+  const playbackRange = splitsPlayback ? viewTimeRange! : mapTimeRange;
 
   useEffect(() => {
-    setReplayMs(timeRange.min);
-  }, [timeRange.min]);
+    setReplayMs(mapTimeRange.min);
+  }, [mapTimeRange.min]);
 
   useEffect(() => {
-    if (!splitsPlayback || !legTimeRange) return;
-    setReplayMs(legTimeRange.min);
+    if (!splitsPlayback || !viewTimeRange) return;
+    setReplayMs(viewTimeRange.min);
     setPlaying(false);
-  }, [splitsPlayback, legTimeRange?.min, legIndex]);
+  }, [splitsPlayback, viewTimeRange?.min, analysisIndex]);
 
   useEffect(() => {
     if (!playing) {
@@ -335,7 +374,7 @@ export default function SessionWorkspace({
       active = Math.min(i + 1, analysis.legs.length - 1);
     }
 
-    setLegIndex((prev) => (prev === active ? prev : active));
+    setAnalysisIndex((prev) => (prev === active ? prev : active));
   }, [
     followRunnerId,
     replayMs,
@@ -345,15 +384,18 @@ export default function SessionWorkspace({
   ]);
 
   const legTracks = useMemo(() => {
-    if (!currentLegCtrl) return [];
     return syncedTracks
       .filter((t) => selected[t.participant.id])
       .map((t) => {
-        const pts = legSegmentPoints(
-          t.syncedPoints,
-          currentLegCtrl.from,
-          currentLegCtrl.to
-        );
+        const pts = viewingOverall
+          ? courseSegmentPoints(t.syncedPoints, courseCtrlPoints)
+          : currentLegCtrl
+            ? legSegmentPoints(
+                t.syncedPoints,
+                currentLegCtrl.from,
+                currentLegCtrl.to
+              )
+            : null;
         if (!pts?.length) return null;
         return {
           id: t.participant.id,
@@ -363,10 +405,16 @@ export default function SessionWorkspace({
         };
       })
       .filter((x): x is NonNullable<typeof x> => x != null);
-  }, [currentLegCtrl, syncedTracks, selected]);
+  }, [
+    viewingOverall,
+    courseCtrlPoints,
+    currentLegCtrl,
+    syncedTracks,
+    selected,
+  ]);
 
   const storyMarkers = useMemo(() => {
-    if (!currentLeg) return [];
+    if (!currentView) return [];
     const marks: {
       key: string;
       lat: number;
@@ -377,7 +425,7 @@ export default function SessionWorkspace({
       atMs?: number;
     }[] = [];
 
-    for (const s of currentLeg.splits) {
+    for (const s of currentView.splits) {
       if (!selected[s.participantId]) continue;
       for (const h of s.hesitations ?? []) {
         marks.push({
@@ -414,7 +462,7 @@ export default function SessionWorkspace({
       }
     }
     return marks;
-  }, [currentLeg, selected]);
+  }, [currentView, selected]);
 
   const speedStoryMarks = useMemo(
     () =>
@@ -431,12 +479,14 @@ export default function SessionWorkspace({
   );
 
   const legFocusBounds = useMemo(() => {
-    if (!currentLegCtrl) return null;
-
-    const pts: { lat: number; lon: number }[] = [
-      currentLegCtrl.from,
-      currentLegCtrl.to,
-    ];
+    const pts: { lat: number; lon: number }[] = [];
+    if (viewingOverall) {
+      pts.push(...courseCtrlPoints);
+    } else if (currentLegCtrl) {
+      pts.push(currentLegCtrl.from, currentLegCtrl.to);
+    } else {
+      return null;
+    }
 
     for (const t of syncedTracks) {
       if (followRunnerId) {
@@ -444,11 +494,15 @@ export default function SessionWorkspace({
       } else if (!selected[t.participant.id]) {
         continue;
       }
-      const seg = legSegmentPoints(
-        t.syncedPoints,
-        currentLegCtrl.from,
-        currentLegCtrl.to
-      );
+      const seg = viewingOverall
+        ? courseSegmentPoints(t.syncedPoints, courseCtrlPoints)
+        : currentLegCtrl
+          ? legSegmentPoints(
+              t.syncedPoints,
+              currentLegCtrl.from,
+              currentLegCtrl.to
+            )
+          : null;
       if (!seg?.length) continue;
       const step = Math.max(1, Math.floor(seg.length / 40));
       for (let i = 0; i < seg.length; i += step) {
@@ -457,13 +511,21 @@ export default function SessionWorkspace({
       pts.push(seg[seg.length - 1]);
     }
 
+    if (pts.length === 0) return null;
     const lats = pts.map((p) => p.lat);
     const lons = pts.map((p) => p.lon);
     return [
       [Math.min(...lats), Math.min(...lons)],
       [Math.max(...lats), Math.max(...lons)],
     ] as [[number, number], [number, number]];
-  }, [currentLegCtrl, syncedTracks, selected, followRunnerId]);
+  }, [
+    viewingOverall,
+    courseCtrlPoints,
+    currentLegCtrl,
+    syncedTracks,
+    selected,
+    followRunnerId,
+  ]);
 
   const speedControlMarks = useMemo(() => {
     return [...controls]
@@ -533,7 +595,7 @@ export default function SessionWorkspace({
           [
             ["map", "Map"],
             ["runners", "Runners"],
-            ["splits", "Splits"],
+            ["splits", "Results"],
           ] as const
         ).map(([id, label]) => (
           <button
@@ -685,10 +747,14 @@ export default function SessionWorkspace({
                           onChange={(e) =>
                             e.currentTarget.form?.requestSubmit()
                           }
-                          title="Sync strategy vs reference"
+                          title={`Sync vs reference: ${SYNC_STRATEGY_HINTS[t.participant.sync_strategy as SyncStrategy] ?? ""}`}
                         >
                           {strategyOptions.map((k) => (
-                            <option key={k} value={k}>
+                            <option
+                              key={k}
+                              value={k}
+                              title={SYNC_STRATEGY_HINTS[k]}
+                            >
                               {SYNC_STRATEGY_LABELS[k]}
                             </option>
                           ))}
@@ -836,10 +902,11 @@ export default function SessionWorkspace({
               storyMarkers={storyMarkers}
               replayMs={replayMs}
               highlightLeg={
-                currentLeg
-                  ? { fromSeq: currentLeg.fromSeq, toSeq: currentLeg.toSeq }
+                currentView && !viewingOverall
+                  ? { fromSeq: currentView.fromSeq, toSeq: currentView.toSeq }
                   : null
               }
+              raceWindow={raceTimeRange}
               resizeToken={`${mobileTab}-${mapFullscreen}`}
               mapOpacity={map?.opacity ?? 0.55}
             />
@@ -903,6 +970,14 @@ export default function SessionWorkspace({
                 <span className="text-forest-400"> / </span>
                 {formatSplitTime(duration)}
               </span>
+              {raceTimeRange && !splitsPlayback && (
+                <span
+                  className="text-[10px] uppercase tracking-wide text-forest-500"
+                  title="Timeline is first control → last control (warm-up/cool-down excluded)"
+                >
+                  Race
+                </span>
+              )}
               {refWallTime != null && (
                 <span className="text-[10px] sm:text-xs text-forest-500 ml-auto font-mono truncate max-w-[40vw] sm:max-w-none">
                   Ref {formatWallTime(refWallTime)}
@@ -911,10 +986,13 @@ export default function SessionWorkspace({
             </div>
             <input
               type="range"
-              min={timeRange.min}
-              max={timeRange.max}
+              min={mapTimeRange.min}
+              max={mapTimeRange.max}
               step={100}
-              value={replayMs}
+              value={Math.min(
+                mapTimeRange.max,
+                Math.max(mapTimeRange.min, replayMs)
+              )}
               onChange={(e) => {
                 setPlaying(false);
                 setReplayMs(Number(e.target.value));
@@ -931,8 +1009,8 @@ export default function SessionWorkspace({
                     color: t.participant.color,
                     points: t.syncedPoints,
                   }))}
-                timeMin={timeRange.min}
-                timeMax={timeRange.max}
+                timeMin={mapTimeRange.min}
+                timeMax={mapTimeRange.max}
                 replayMs={replayMs}
                 controls={speedControlMarks}
                 storyMarks={speedStoryMarks}
@@ -976,11 +1054,15 @@ export default function SessionWorkspace({
                   storyMarkers={storyMarkers}
                   replayMs={replayMs}
                   highlightLeg={
-                    currentLeg
-                      ? { fromSeq: currentLeg.fromSeq, toSeq: currentLeg.toSeq }
+                    currentView && !viewingOverall
+                      ? {
+                          fromSeq: currentView.fromSeq,
+                          toSeq: currentView.toSeq,
+                        }
                       : null
                   }
-                  resizeToken={`splits-${mobileTab}-${legIndex}`}
+                  raceWindow={raceTimeRange}
+                  resizeToken={`splits-${mobileTab}-${analysisIndex}`}
                   mapOpacity={map?.opacity ?? 0.55}
                 />
               </div>
@@ -1010,11 +1092,9 @@ export default function SessionWorkspace({
                     <span className="text-forest-400"> / </span>
                     {formatSplitTime(duration)}
                   </span>
-                  {legTimeRange && (
-                    <span className="text-[10px] uppercase tracking-wide text-forest-500 ml-auto">
-                      Leg window
-                    </span>
-                  )}
+                  <span className="text-[10px] uppercase tracking-wide text-forest-500 ml-auto">
+                    {viewingOverall ? "Overall" : "Leg window"}
+                  </span>
                 </div>
                 <input
                   type="range"
@@ -1038,12 +1118,12 @@ export default function SessionWorkspace({
 
           <div className="flex-1 min-h-0 overflow-auto p-3 space-y-3">
             <h2 className="text-xs font-semibold uppercase tracking-wider text-forest-600">
-              Leg analysis
+              Analysis
             </h2>
-            {analysis.legs.length === 0 ? (
+            {analysis.legs.length === 0 && !hasOverall ? (
               <p className="text-sm text-forest-600">
                 {initialTracks.some((t) => t.points.length > 0)
-                  ? "Tracks are ready. Add controls with GPS to see leg splits. Replay works without controls."
+                  ? "Tracks are ready. Add controls with GPS to see results. Replay works without controls."
                   : "Upload GPX tracks to overlay routes. Map image is optional."}
               </p>
             ) : (
@@ -1051,19 +1131,27 @@ export default function SessionWorkspace({
                 <div className="flex items-center gap-1.5">
                   <button
                     type="button"
-                    aria-label="Previous leg"
-                    disabled={legIndex <= 0}
-                    onClick={() => setLegIndex((i) => Math.max(0, i - 1))}
+                    aria-label="Previous"
+                    disabled={analysisIndex <= minAnalysisIndex}
+                    onClick={() =>
+                      setAnalysisIndex((i) => Math.max(minAnalysisIndex, i - 1))
+                    }
                     className="shrink-0 w-9 h-9 rounded-lg border border-forest-200 bg-white text-forest-800 text-lg leading-none disabled:opacity-35 disabled:pointer-events-none hover:bg-forest-50"
                   >
                     ‹
                   </button>
                   <select
                     className="min-w-0 flex-1 rounded-lg border border-forest-200 px-2 py-2 text-sm"
-                    value={legIndex}
-                    onChange={(e) => setLegIndex(Number(e.target.value))}
-                    aria-label="Select leg"
+                    value={viewingOverall ? -1 : Math.max(0, analysisIndex)}
+                    onChange={(e) => setAnalysisIndex(Number(e.target.value))}
+                    aria-label="Select overall or leg"
                   >
+                    {hasOverall && analysis.overall && (
+                      <option value={-1}>
+                        Overall · {analysis.overall.fromCode} →{" "}
+                        {analysis.overall.toCode}
+                      </option>
+                    )}
                     {analysis.legs.map((leg, i) => (
                       <option key={i} value={i}>
                         {leg.fromCode} → {leg.toCode}
@@ -1072,11 +1160,11 @@ export default function SessionWorkspace({
                   </select>
                   <button
                     type="button"
-                    aria-label="Next leg"
-                    disabled={legIndex >= analysis.legs.length - 1}
+                    aria-label="Next"
+                    disabled={analysisIndex >= maxAnalysisIndex}
                     onClick={() =>
-                      setLegIndex((i) =>
-                        Math.min(analysis.legs.length - 1, i + 1)
+                      setAnalysisIndex((i) =>
+                        Math.min(maxAnalysisIndex, i + 1)
                       )
                     }
                     className="shrink-0 w-9 h-9 rounded-lg border border-forest-200 bg-white text-forest-800 text-lg leading-none disabled:opacity-35 disabled:pointer-events-none hover:bg-forest-50"
@@ -1085,9 +1173,9 @@ export default function SessionWorkspace({
                   </button>
                 </div>
 
-                {currentLeg && (
+                {currentView && (
                   <div className="space-y-2">
-                    {currentLeg.splits.map((s, rank) => {
+                    {currentView.splits.map((s, rank) => {
                       const pace = formatLegPace(s.timeMs, s.distanceM);
                       const medal = medalForRank(rank, s.timeMs != null);
                       const hesMs = (s.hesitations ?? []).reduce(
@@ -1225,10 +1313,11 @@ export default function SessionWorkspace({
               storyMarkers={storyMarkers}
               replayMs={replayMs}
               highlightLeg={
-                currentLeg
-                  ? { fromSeq: currentLeg.fromSeq, toSeq: currentLeg.toSeq }
+                currentView && !viewingOverall
+                  ? { fromSeq: currentView.fromSeq, toSeq: currentView.toSeq }
                   : null
               }
+              raceWindow={raceTimeRange}
               resizeToken={`fs-${mapFullscreen}`}
               mapOpacity={map?.opacity ?? 0.55}
             />
@@ -1279,13 +1368,24 @@ export default function SessionWorkspace({
                 <span className="text-forest-400"> / </span>
                 {formatSplitTime(duration)}
               </span>
+              {raceTimeRange && (
+                <span
+                  className="text-[10px] uppercase tracking-wide text-forest-500"
+                  title="Timeline is first control → last control"
+                >
+                  Race
+                </span>
+              )}
             </div>
             <input
               type="range"
-              min={timeRange.min}
-              max={timeRange.max}
+              min={mapTimeRange.min}
+              max={mapTimeRange.max}
               step={100}
-              value={replayMs}
+              value={Math.min(
+                mapTimeRange.max,
+                Math.max(mapTimeRange.min, replayMs)
+              )}
               onChange={(e) => {
                 setPlaying(false);
                 setReplayMs(Number(e.target.value));

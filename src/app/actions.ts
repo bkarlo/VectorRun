@@ -13,6 +13,7 @@ import {
   saveMapOpacity,
   setManualDelta,
   setParticipantSyncStrategy,
+  setRaceWindowEnabled,
   setReferenceParticipant,
   updateEvent,
 } from "@/lib/events";
@@ -55,6 +56,15 @@ export async function actionSaveGeoref(eventId: string, pairs: GeorefPair[]) {
 
 export async function actionSaveMapOpacity(eventId: string, opacity: number) {
   saveMapOpacity(eventId, opacity);
+  revalidatePath(`/events/${eventId}/setup`);
+  revalidatePath(`/events/${eventId}`);
+}
+
+export async function actionSaveRaceWindow(
+  eventId: string,
+  enabled: boolean
+) {
+  setRaceWindowEnabled(eventId, enabled);
   revalidatePath(`/events/${eventId}/setup`);
   revalidatePath(`/events/${eventId}`);
 }

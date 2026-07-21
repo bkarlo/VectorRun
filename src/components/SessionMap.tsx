@@ -15,6 +15,7 @@ import "leaflet/dist/leaflet.css";
 import type { AffineTransform, ControlRow, TrackPoint } from "@/lib/types";
 import { mapToGps } from "@/lib/georef";
 import { interpolateAtTime } from "@/lib/gpx";
+import { splitTrackByTimeWindow } from "@/lib/sync";
 import RotatedImageOverlay from "./RotatedImageOverlay";
 
 function runnerInitials(name: string): string {
@@ -82,6 +83,8 @@ interface Props {
   storyMarkers?: StoryMarker[];
   replayMs: number;
   highlightLeg: { fromSeq: number; toSeq: number } | null;
+  /** When set, warm-up/cool-down outside this window are drawn dim. */
+  raceWindow?: { min: number; max: number } | null;
   resizeToken?: string | number;
   mapOpacity?: number;
 }
@@ -153,6 +156,7 @@ export default function SessionMap({
   storyMarkers = [],
   replayMs,
   highlightLeg,
+  raceWindow = null,
   resizeToken,
   mapOpacity = 0.55,
 }: Props) {
@@ -169,7 +173,8 @@ export default function SessionMap({
   }, [mapAffine, mapWidth, mapHeight]);
 
   const hasMap = !!(mapUrl && corners);
-  const dimFull = !!highlightLeg && legTracks.length > 0;
+  const dimRace = !!highlightLeg && legTracks.length > 0;
+  const useRaceSplit = !!raceWindow;
 
   return (
     <MapContainer
@@ -220,8 +225,48 @@ export default function SessionMap({
           </CircleMarker>
         ))}
 
-      {/* Full course tracks (dimmed when a leg is emphasized) */}
+      {/* Full / race-split tracks (warm-up & cool-down stay dim) */}
       {tracks.map((t) => {
+        if (useRaceSplit && raceWindow) {
+          const { before, during, after } = splitTrackByTimeWindow(
+            t.points,
+            raceWindow
+          );
+          const raceOpacity = dimRace ? 0.28 : 0.95;
+          const raceWeight = dimRace ? 2 : 3;
+          const segs: {
+            key: string;
+            pts: TrackPoint[];
+            opacity: number;
+            weight: number;
+          }[] = [
+            { key: "before", pts: before, opacity: 0.14, weight: 2 },
+            {
+              key: "during",
+              pts: during,
+              opacity: raceOpacity,
+              weight: raceWeight,
+            },
+            { key: "after", pts: after, opacity: 0.14, weight: 2 },
+          ];
+          return segs.map((seg) => {
+            if (seg.pts.length < 2) return null;
+            return (
+              <Polyline
+                key={`${t.id}-${seg.key}`}
+                positions={seg.pts.map(
+                  (p) => [p.lat, p.lon] as [number, number]
+                )}
+                pathOptions={{
+                  color: t.color,
+                  weight: seg.weight,
+                  opacity: seg.opacity,
+                }}
+              />
+            );
+          });
+        }
+
         const latlngs = t.points.map(
           (p) => [p.lat, p.lon] as [number, number]
         );
@@ -231,8 +276,8 @@ export default function SessionMap({
             positions={latlngs}
             pathOptions={{
               color: t.color,
-              weight: dimFull ? 2 : 3,
-              opacity: dimFull ? 0.28 : 1,
+              weight: dimRace ? 2 : 3,
+              opacity: dimRace ? 0.28 : 1,
             }}
           />
         );

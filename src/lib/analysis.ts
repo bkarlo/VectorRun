@@ -3,12 +3,14 @@ import { mpsToPaceMinPerKm } from "./speed";
 import {
   applyOffset,
   computeReferenceSync,
+  courseSegmentIndices,
   findPunchIndex,
   legSegmentIndices,
 } from "./sync";
 import { detectHesitations } from "./hesitation";
 import { applyDecisionQuality } from "./decisionQuality";
 import type {
+  AnalysisLeg,
   AnalysisPayload,
   ControlRow,
   LegSplit,
@@ -22,6 +24,158 @@ export interface RunnerTrack {
   participant: ParticipantRow;
   track: TrackRow;
   points: TrackPoint[];
+}
+
+function buildLeg(
+  synced: { runner: RunnerTrack; points: TrackPoint[] }[],
+  from: ControlRow,
+  to: ControlRow
+): AnalysisLeg {
+  const fromCtrl = { lat: from.lat!, lon: from.lon! };
+  const toCtrl = { lat: to.lat!, lon: to.lon! };
+  const splits: LegSplit[] = [];
+  const segments: Record<string, TrackPoint[]> = {};
+
+  for (const { runner, points } of synced) {
+    const idx = legSegmentIndices(points, fromCtrl, toCtrl);
+    let punchedFrom = false;
+    let punchedTo = false;
+    let timeMs: number | null = null;
+    let distanceM: number | null = null;
+    let climbM: number | null = null;
+    let hesitations = undefined as
+      | ReturnType<typeof detectHesitations>
+      | undefined;
+
+    if (idx) {
+      punchedFrom = true;
+      punchedTo = true;
+      const segment = points.slice(idx.fromIdx, idx.toIdx + 1);
+      segments[runner.participant.id] = segment;
+      timeMs = points[idx.toIdx].time - points[idx.fromIdx].time;
+      distanceM = pathDistanceM(segment);
+      climbM = pathClimbM(segment);
+      const h = detectHesitations(segment);
+      if (h.length) hesitations = h;
+    } else {
+      const fromIdx = findPunchIndex(points, fromCtrl);
+      punchedFrom = fromIdx >= 0;
+      if (punchedFrom) {
+        punchedTo = findPunchIndex(points, toCtrl, fromIdx + 1) >= 0;
+      }
+    }
+
+    splits.push({
+      participantId: runner.participant.id,
+      participantName: runner.participant.name,
+      color: runner.participant.color,
+      fromSeq: from.sequence,
+      toSeq: to.sequence,
+      fromCode: from.code,
+      toCode: to.code,
+      timeMs,
+      distanceM,
+      climbM,
+      punchedFrom,
+      punchedTo,
+      hesitations,
+    });
+  }
+
+  applyDecisionQuality(splits, segments, toCtrl);
+
+  splits.sort((a, b) => {
+    if (a.timeMs == null && b.timeMs == null) return 0;
+    if (a.timeMs == null) return 1;
+    if (b.timeMs == null) return -1;
+    return a.timeMs - b.timeMs;
+  });
+
+  return {
+    fromSeq: from.sequence,
+    toSeq: to.sequence,
+    fromCode: from.code,
+    toCode: to.code,
+    splits,
+  };
+}
+
+/** Full course following every control in order (not a direct S→F shortcut). */
+function buildOverall(
+  synced: { runner: RunnerTrack; points: TrackPoint[] }[],
+  sorted: ControlRow[]
+): AnalysisLeg {
+  const first = sorted[0];
+  const last = sorted[sorted.length - 1];
+  const course = sorted.map((c) => ({ lat: c.lat!, lon: c.lon! }));
+  const toCtrl = course[course.length - 1];
+  const splits: LegSplit[] = [];
+  const segments: Record<string, TrackPoint[]> = {};
+
+  for (const { runner, points } of synced) {
+    const idx = courseSegmentIndices(points, course);
+    let punchedFrom = false;
+    let punchedTo = false;
+    let timeMs: number | null = null;
+    let distanceM: number | null = null;
+    let climbM: number | null = null;
+    let hesitations = undefined as
+      | ReturnType<typeof detectHesitations>
+      | undefined;
+
+    if (idx) {
+      punchedFrom = true;
+      punchedTo = true;
+      const segment = points.slice(idx.fromIdx, idx.toIdx + 1);
+      segments[runner.participant.id] = segment;
+      timeMs = points[idx.toIdx].time - points[idx.fromIdx].time;
+      distanceM = pathDistanceM(segment);
+      climbM = pathClimbM(segment);
+      const h = detectHesitations(segment);
+      if (h.length) hesitations = h;
+    } else {
+      const fromIdx = findPunchIndex(points, course[0]);
+      punchedFrom = fromIdx >= 0;
+      if (punchedFrom) {
+        // Still require ordered finish after visiting intermediates when possible
+        const full = courseSegmentIndices(points, course);
+        punchedTo = full != null;
+      }
+    }
+
+    splits.push({
+      participantId: runner.participant.id,
+      participantName: runner.participant.name,
+      color: runner.participant.color,
+      fromSeq: first.sequence,
+      toSeq: last.sequence,
+      fromCode: first.code,
+      toCode: last.code,
+      timeMs,
+      distanceM,
+      climbM,
+      punchedFrom,
+      punchedTo,
+      hesitations,
+    });
+  }
+
+  applyDecisionQuality(splits, segments, toCtrl);
+
+  splits.sort((a, b) => {
+    if (a.timeMs == null && b.timeMs == null) return 0;
+    if (a.timeMs == null) return 1;
+    if (b.timeMs == null) return -1;
+    return a.timeMs - b.timeMs;
+  });
+
+  return {
+    fromSeq: first.sequence,
+    toSeq: last.sequence,
+    fromCode: first.code,
+    toCode: last.code,
+    splits,
+  };
 }
 
 export function analyzeEvent(
@@ -53,79 +207,15 @@ export function analyzeEvent(
     });
   }
 
-  const legs: AnalysisPayload["legs"] = [];
-
+  const legs: AnalysisLeg[] = [];
   for (let i = 0; i < sorted.length - 1; i++) {
-    const from = sorted[i];
-    const to = sorted[i + 1];
-    const fromCtrl = { lat: from.lat!, lon: from.lon! };
-    const toCtrl = { lat: to.lat!, lon: to.lon! };
-    const splits: LegSplit[] = [];
-    const segments: Record<string, TrackPoint[]> = {};
-
-    for (const { runner, points } of synced) {
-      const idx = legSegmentIndices(points, fromCtrl, toCtrl);
-      let punchedFrom = false;
-      let punchedTo = false;
-      let timeMs: number | null = null;
-      let distanceM: number | null = null;
-      let climbM: number | null = null;
-      let hesitations = undefined as ReturnType<typeof detectHesitations> | undefined;
-
-      if (idx) {
-        punchedFrom = true;
-        punchedTo = true;
-        const segment = points.slice(idx.fromIdx, idx.toIdx + 1);
-        segments[runner.participant.id] = segment;
-        timeMs = points[idx.toIdx].time - points[idx.fromIdx].time;
-        distanceM = pathDistanceM(segment);
-        climbM = pathClimbM(segment);
-        const h = detectHesitations(segment);
-        if (h.length) hesitations = h;
-      } else {
-        const fromIdx = findPunchIndex(points, fromCtrl);
-        punchedFrom = fromIdx >= 0;
-        if (punchedFrom) {
-          punchedTo = findPunchIndex(points, toCtrl, fromIdx + 1) >= 0;
-        }
-      }
-
-      splits.push({
-        participantId: runner.participant.id,
-        participantName: runner.participant.name,
-        color: runner.participant.color,
-        fromSeq: from.sequence,
-        toSeq: to.sequence,
-        fromCode: from.code,
-        toCode: to.code,
-        timeMs,
-        distanceM,
-        climbM,
-        punchedFrom,
-        punchedTo,
-        hesitations,
-      });
-    }
-
-    applyDecisionQuality(splits, segments, toCtrl);
-
-    splits.sort((a, b) => {
-      if (a.timeMs == null && b.timeMs == null) return 0;
-      if (a.timeMs == null) return 1;
-      if (b.timeMs == null) return -1;
-      return a.timeMs - b.timeMs;
-    });
-
-    legs.push({
-      fromSeq: from.sequence,
-      toSeq: to.sequence,
-      fromCode: from.code,
-      toCode: to.code,
-      splits,
-    });
+    legs.push(buildLeg(synced, sorted[i], sorted[i + 1]));
   }
 
+  const overall = sorted.length >= 2 ? buildOverall(synced, sorted) : null;
+
   return {
+    overall,
     legs,
     syncOffsets: sync.offsets,
     syncDeltasMs: sync.deltasMs,

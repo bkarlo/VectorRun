@@ -30,6 +30,12 @@ function normalizeEvent(row: EventRow): EventRow {
   return {
     ...row,
     reference_participant_id: row.reference_participant_id ?? null,
+    race_window_enabled:
+      row.race_window_enabled === false ||
+      (row as { race_window_enabled?: number | boolean }).race_window_enabled ===
+        0
+        ? false
+        : true,
   };
 }
 
@@ -83,6 +89,13 @@ export function updateEvent(
     );
   invalidateAnalysis(id);
   return getEvent(id)!;
+}
+
+export function setRaceWindowEnabled(eventId: string, enabled: boolean) {
+  getDb()
+    .prepare(`UPDATE events SET race_window_enabled = ? WHERE id = ?`)
+    .run(enabled ? 1 : 0, eventId);
+  return getEvent(eventId)!;
 }
 
 export function setReferenceParticipant(
@@ -422,7 +435,11 @@ export function getOrComputeAnalysis(eventId: string): AnalysisPayload {
   if (cached) {
     const payload = JSON.parse(cached.payload_json) as AnalysisPayload;
     // Old cache shape — recompute
-    if (payload.syncDeltasMs === undefined || payload.referenceId === undefined) {
+    if (
+      payload.syncDeltasMs === undefined ||
+      payload.referenceId === undefined ||
+      payload.overall === undefined
+    ) {
       invalidateAnalysis(eventId);
     } else {
       return payload;

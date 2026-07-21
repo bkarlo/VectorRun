@@ -95,6 +95,11 @@ function migrate(database: Database.Database) {
       `ALTER TABLE events ADD COLUMN reference_participant_id TEXT`
     );
   }
+  if (!eventCols.has("race_window_enabled")) {
+    database.exec(
+      `ALTER TABLE events ADD COLUMN race_window_enabled INTEGER NOT NULL DEFAULT 1`
+    );
+  }
 
   const partCols = tableColumns(database, "participants");
   if (!partCols.has("sync_strategy")) {
@@ -126,9 +131,9 @@ function migrate(database: Database.Database) {
   const userVersion = Number(
     database.pragma("user_version", { simple: true }) ?? 0
   );
-  if (userVersion < 6) {
+  if (userVersion < 9) {
     database.exec(`DELETE FROM analysis_cache`);
-    database.pragma("user_version = 6");
+    database.pragma("user_version = 9");
   }
 }
 

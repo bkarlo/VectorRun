@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import Link from "next/link";
 import type { GeorefPair, TrackPoint } from "@/lib/types";
-import { actionSaveGeoref, actionSaveControls, actionSaveMapOpacity } from "@/app/actions";
+import { actionSaveGeoref, actionSaveControls, actionSaveMapOpacity, actionSaveRaceWindow } from "@/app/actions";
 import { fitAffine, gpsToMap } from "@/lib/georef";
 import { trackTouchesControl } from "@/lib/sync";
 
@@ -38,6 +38,7 @@ interface Props {
   initialControls: ControlDraft[];
   tracks: SetupTrack[];
   initialMapOpacity?: number;
+  initialRaceWindowEnabled?: boolean;
 }
 
 type Mode = "place" | "points" | "controls";
@@ -70,6 +71,10 @@ export default function SetupWizard(props: Props) {
     props.initialMapOpacity ?? 0.55
   );
   const [opacityStatus, setOpacityStatus] = useState("");
+  const [raceWindowEnabled, setRaceWindowEnabled] = useState(
+    props.initialRaceWindowEnabled !== false
+  );
+  const [raceWindowStatus, setRaceWindowStatus] = useState("");
   const imgRef = useRef<HTMLImageElement>(null);
   const codeInputRefs = useRef<(HTMLInputElement | null)[]>([]);
 
@@ -307,6 +312,38 @@ export default function SetupWizard(props: Props) {
           )}
         </div>
       )}
+
+      <div className="panel rounded-xl p-4 flex flex-wrap items-center gap-3">
+        <div className="min-w-0 flex-1">
+          <h3 className="font-display text-base text-forest-900">
+            Race window
+          </h3>
+          <p className="text-xs text-forest-600">
+            Scope the session timeline to first control → last control and dim
+            warm-up / cool-down on the map. Turn off to scrub the full GPX.
+          </p>
+        </div>
+        <label className="flex items-center gap-2 text-sm text-forest-800 cursor-pointer">
+          <input
+            type="checkbox"
+            className="rounded border-forest-300"
+            checked={raceWindowEnabled}
+            onChange={(e) => {
+              const next = e.target.checked;
+              setRaceWindowEnabled(next);
+              void actionSaveRaceWindow(props.eventId, next).then(() =>
+                setRaceWindowStatus(next ? "On" : "Off")
+              );
+            }}
+          />
+          <span className="font-medium">Enabled</span>
+        </label>
+        {raceWindowStatus && (
+          <span className="text-xs font-mono text-forest-600">
+            {raceWindowStatus}
+          </span>
+        )}
+      </div>
 
       <div className="flex flex-wrap gap-2 items-center">
         <div className="flex rounded-lg border border-forest-200 overflow-hidden text-sm">

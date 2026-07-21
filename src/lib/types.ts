@@ -22,10 +22,21 @@ export const SYNC_STRATEGY_LABELS: Record<SyncStrategy, string> = {
   motion_start: "Motion",
   recording_start: "Record",
   track_match: "Match",
-  first_control: "Control",
-  start_punch: "Start",
+  first_control: "Control 1",
+  start_punch: "Start (S)",
   best_fit: "Best fit",
   manual: "Manual",
+};
+
+/** Short hints for UI tooltips (warm-up / sync guidance). */
+export const SYNC_STRATEGY_HINTS: Record<SyncStrategy, string> = {
+  motion_start: "Align when sustained running begins (can catch warm-up jogging).",
+  recording_start: "Align first GPS points — poor if warm-up lengths differ.",
+  track_match: "Slide tracks to best spatial overlap.",
+  first_control: "Align on control 1 (after start punch). Good with warm-up in GPX.",
+  start_punch: "Align on the first course control (start triangle). Best with warm-up in GPX.",
+  best_fit: "Prefer control 1, else track match.",
+  manual: "Set Δ vs reference yourself.",
 };
 
 /** @deprecated */
@@ -75,6 +86,8 @@ export interface EventRow {
   /** Kept for DB compat; sync is per-runner now */
   sync_mode: string;
   reference_participant_id: string | null;
+  /** When true, map timeline scopes to first→last control (default on). */
+  race_window_enabled: boolean;
   created_at: string;
 }
 
@@ -179,14 +192,18 @@ export interface LegSplit {
   detours?: DetourEvent[];
 }
 
+export interface AnalysisLeg {
+  fromSeq: number;
+  toSeq: number;
+  fromCode: string;
+  toCode: string;
+  splits: LegSplit[];
+}
+
 export interface AnalysisPayload {
-  legs: {
-    fromSeq: number;
-    toSeq: number;
-    fromCode: string;
-    toCode: string;
-    splits: LegSplit[];
-  }[];
+  /** Full course S→F (first geo control → last). */
+  overall: AnalysisLeg | null;
+  legs: AnalysisLeg[];
   syncOffsets: Record<string, number>;
   syncDeltasMs: Record<string, number>;
   referenceId: string | null;

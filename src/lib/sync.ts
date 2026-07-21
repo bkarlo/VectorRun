@@ -17,6 +17,42 @@ export function legSegmentIndices(
   return { fromIdx, toIdx };
 }
 
+/**
+ * Full-course segment following controls in order (S→1→…→F).
+ * Required when start and finish are co-located — a direct S→F punch
+ * would collapse to a few meters at the start triangle.
+ */
+export function courseSegmentIndices(
+  points: TrackPoint[],
+  controls: { lat: number; lon: number }[],
+  radiusM = PUNCH_RADIUS_M
+): { fromIdx: number; toIdx: number; punchIndices: number[] } | null {
+  if (controls.length < 2 || points.length < 2) return null;
+  const punchIndices: number[] = [];
+  let searchFrom = 0;
+  for (const c of controls) {
+    const idx = findPunchIndex(points, c, searchFrom, radiusM);
+    if (idx < 0) return null;
+    punchIndices.push(idx);
+    searchFrom = idx + 1;
+  }
+  const fromIdx = punchIndices[0];
+  const toIdx = punchIndices[punchIndices.length - 1];
+  if (toIdx <= fromIdx) return null;
+  return { fromIdx, toIdx, punchIndices };
+}
+
+/** Inclusive slice along the ordered course (all controls). */
+export function courseSegmentPoints(
+  points: TrackPoint[],
+  controls: { lat: number; lon: number }[],
+  radiusM = PUNCH_RADIUS_M
+): TrackPoint[] | null {
+  const idx = courseSegmentIndices(points, controls, radiusM);
+  if (!idx) return null;
+  return points.slice(idx.fromIdx, idx.toIdx + 1);
+}
+
 /** Inclusive slice of points between from/to punches. */
 export function legSegmentPoints(
   points: TrackPoint[],
@@ -104,13 +140,106 @@ function controlPunchAbs(
     .sort((a, b) => a.sequence - b.sequence);
   if (geo.length === 0) return null;
 
+  if (kind === "start_punch") {
+    const target = geo[0];
+    if (target.lat == null || target.lon == null) return null;
+    const idx = findPunchIndex(points, { lat: target.lat, lon: target.lon });
+    return idx >= 0 ? points[idx].time : null;
+  }
+
+  // first_control: prefer control seq 1 (else 2nd geo), searched AFTER start
+  // punch when possible so warm-up near that control is ignored.
+  const start = geo[0];
   const target =
-    kind === "start_punch"
-      ? geo[0]
-      : (geo.find((c) => c.sequence === 1) ?? geo[1] ?? geo[0]);
+    geo.find((c) => c.sequence === 1) ?? geo[1] ?? geo[0];
   if (!target || target.lat == null || target.lon == null) return null;
-  const idx = findPunchIndex(points, { lat: target.lat, lon: target.lon });
+
+  let fromIndex = 0;
+  if (
+    start &&
+    start.id !== target.id &&
+    start.lat != null &&
+    start.lon != null
+  ) {
+    const startIdx = findPunchIndex(points, {
+      lat: start.lat,
+      lon: start.lon,
+    });
+    if (startIdx >= 0) fromIndex = startIdx + 1;
+  }
+
+  const idx = findPunchIndex(
+    points,
+    { lat: target.lat, lon: target.lon },
+    fromIndex
+  );
   return idx >= 0 ? points[idx].time : null;
+}
+
+/**
+ * Shared race window on the synced timeline:
+ * earliest course start punch → latest course finish punch,
+ * walking controls in order (handles co-located S/F).
+ */
+export function computeRaceWindow(
+  tracks: { points: TrackPoint[] }[],
+  controls: ControlRow[]
+): { min: number; max: number } | null {
+  const geo = controls
+    .filter((c) => c.lat != null && c.lon != null)
+    .sort((a, b) => a.sequence - b.sequence);
+  if (geo.length < 2 || tracks.length === 0) return null;
+
+  const course = geo.map((c) => ({ lat: c.lat!, lon: c.lon! }));
+  let minFrom = Infinity;
+  let maxTo = -Infinity;
+
+  for (const t of tracks) {
+    if (t.points.length < 2) continue;
+    const idx = courseSegmentIndices(t.points, course);
+    if (!idx) continue;
+    minFrom = Math.min(minFrom, t.points[idx.fromIdx].time);
+    maxTo = Math.max(maxTo, t.points[idx.toIdx].time);
+  }
+
+  if (!Number.isFinite(minFrom) || !Number.isFinite(maxTo) || maxTo <= minFrom) {
+    return null;
+  }
+  // Small pad so avatars aren't clipped at the endpoints
+  const pad = 1_000;
+  return { min: minFrom, max: maxTo + pad };
+}
+
+/** Split a track into before / during / after a time window (inclusive). */
+export function splitTrackByTimeWindow(
+  points: TrackPoint[],
+  window: { min: number; max: number }
+): {
+  before: TrackPoint[];
+  during: TrackPoint[];
+  after: TrackPoint[];
+} {
+  if (points.length === 0) {
+    return { before: [], during: [], after: [] };
+  }
+  const before: TrackPoint[] = [];
+  const during: TrackPoint[] = [];
+  const after: TrackPoint[] = [];
+  for (const p of points) {
+    if (p.time < window.min) before.push(p);
+    else if (p.time > window.max) after.push(p);
+    else during.push(p);
+  }
+  // Bridge gaps so polylines connect at window edges
+  if (before.length && during.length) {
+    during.unshift(before[before.length - 1]);
+  } else if (before.length && !during.length && after.length) {
+    // no points inside window — leave empty during
+  }
+  if (during.length && after.length) {
+    after.unshift(during[during.length - 1]);
+  }
+  return { before, during, after };
 }
 
 function relativeTrack(points: TrackPoint[]): TrackPoint[] {
