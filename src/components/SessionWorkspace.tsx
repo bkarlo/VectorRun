@@ -18,7 +18,7 @@ import { fitAffine, imageOverlayBounds } from "@/lib/georef";
 import { DEFAULT_MAP_BOUNDS } from "@/lib/geoDefaults";
 import {
   applyOffset,
-  computeDayRaceWindow,
+  computeRaceWindow,
   computeReferenceSync,
   courseSegmentIndices,
   courseSegmentPoints,
@@ -66,7 +66,7 @@ export default function SessionWorkspace({
   event,
   map,
   controls,
-  dayPhases,
+  dayPhases: _dayPhases,
   tracks: initialTracks,
   analysis,
 }: Props) {
@@ -89,7 +89,14 @@ export default function SessionWorkspace({
   const playRef = useRef<number | null>(null);
   const PLAYBACK_SPEEDS = [1, 2, 5, 10, 30, 60, 120, 300] as const;
 
+  const coursePhases = analysis.coursePhases ?? [];
+  const activeCourse =
+    coursePhases[
+      Math.min(Math.max(0, coursePhaseIndex), Math.max(0, coursePhases.length - 1))
+    ] ?? null;
+
   const referenceId =
+    activeCourse?.referenceId ??
     analysis.referenceId ??
     event.reference_participant_id ??
     initialTracks[0]?.participant.id ??
@@ -102,48 +109,54 @@ export default function SessionWorkspace({
     return fitAffine(JSON.parse(map.georef_json));
   }, [map]);
 
+  /** Per-course sync on real-time course slices (independent Δ per course). */
   const syncedTracks = useMemo(() => {
     const withPoints = initialTracks.filter((t) => t.points.length > 0);
+    const windows = activeCourse?.windows ?? {};
+    const hasWindows = Object.keys(windows).length > 0;
+
+    const slicedInputs = withPoints.map((t) => {
+      const w = windows[t.participant.id];
+      const points =
+        w && w.toIdx >= w.fromIdx
+          ? t.points.slice(w.fromIdx, w.toIdx + 1)
+          : hasWindows
+            ? []
+            : t.points;
+      return { t, points };
+    });
+
+    const offsets = activeCourse?.syncOffsets;
+    const deltas = activeCourse?.syncDeltasMs;
     const sync =
-      Object.keys(analysis.syncOffsets).length > 0 &&
-      analysis.syncDeltasMs !== undefined
-        ? {
-            offsets: analysis.syncOffsets,
-            deltasMs: analysis.syncDeltasMs,
-          }
+      offsets && Object.keys(offsets).length > 0 && deltas !== undefined
+        ? { offsets, deltasMs: deltas }
         : computeReferenceSync(
             referenceId,
-            withPoints.map((t) => ({
+            slicedInputs.map(({ t, points }) => ({
               id: t.participant.id,
-              points: t.points,
+              points,
               strategy: t.participant.sync_strategy,
               manualDeltaMs: t.track?.start_offset_ms ?? 0,
             })),
             controls
           );
 
-    return withPoints.map((t) => {
+    return slicedInputs.map(({ t, points }) => {
       const offset = sync.offsets[t.participant.id] ?? 0;
-      const refOffset = referenceId
-        ? (sync.offsets[referenceId] ?? 0)
-        : 0;
-      // Version 2: relative clock remap vs reference (e.g. −10 min if other started 10 min later)
+      const refOffset = referenceId ? (sync.offsets[referenceId] ?? 0) : 0;
       const deltaMs =
-        t.participant.id === referenceId ? 0 : offset - refOffset;
+        t.participant.id === referenceId
+          ? 0
+          : (deltas?.[t.participant.id] ?? offset - refOffset);
       return {
         ...t,
-        syncedPoints: applyOffset(t.points, offset),
+        syncedPoints: applyOffset(points, offset),
         offset,
         deltaMs,
       };
     });
-  }, [
-    initialTracks,
-    analysis.syncOffsets,
-    analysis.syncDeltasMs,
-    referenceId,
-    controls,
-  ]);
+  }, [initialTracks, activeCourse, referenceId, controls]);
 
   const fullTimeRange = useMemo(() => {
     let min = Infinity;
@@ -160,20 +173,28 @@ export default function SessionWorkspace({
 
   const raceTimeRange = useMemo(() => {
     if (event.race_window_enabled === false) return null;
+    if (!activeCourse?.controlCodes.length) return null;
+    const byCode = new Map(controls.map((c) => [c.code, c]));
+    const ordered: ControlRow[] = [];
+    for (const code of activeCourse.controlCodes) {
+      const c = byCode.get(code);
+      if (c && c.lat != null && c.lon != null) ordered.push(c);
+    }
+    if (ordered.length < 2) return null;
     const tracks = syncedTracks
       .filter((t) => selected[t.participant.id] && t.syncedPoints.length > 0)
       .map((t) => ({ points: t.syncedPoints }));
-    return computeDayRaceWindow(tracks, controls, dayPhases);
-  }, [syncedTracks, selected, controls, dayPhases, event.race_window_enabled]);
+    return computeRaceWindow(tracks, ordered);
+  }, [
+    syncedTracks,
+    selected,
+    controls,
+    activeCourse,
+    event.race_window_enabled,
+  ]);
 
-  /** Map / fullscreen timeline: race window when enabled + punches, else full GPX. */
+  /** Map / fullscreen timeline: active course (race window when enabled). */
   const mapTimeRange = raceTimeRange ?? fullTimeRange;
-
-  const coursePhases = analysis.coursePhases ?? [];
-  const activeCourse =
-    coursePhases[
-      Math.min(Math.max(0, coursePhaseIndex), Math.max(0, coursePhases.length - 1))
-    ] ?? null;
 
   const hasOverall = activeCourse?.overall != null;
   const activeLegs = activeCourse?.legs ?? [];
@@ -582,7 +603,7 @@ export default function SessionWorkspace({
           mapFullscreen ? "hidden" : ""
         }`}
       >
-        <div className="flex items-center gap-2 sm:gap-3 min-w-0">
+        <div className="flex items-center gap-2 sm:gap-3 min-w-0 flex-1">
           <Link
             href="/"
             className="font-display text-base sm:text-lg text-forest-900 shrink-0"
@@ -590,9 +611,29 @@ export default function SessionWorkspace({
             VectorRun
           </Link>
           <span className="text-forest-300 hidden sm:inline">/</span>
-          <h1 className="truncate font-medium text-forest-800 text-sm sm:text-base">
+          <h1 className="truncate font-medium text-forest-800 text-sm sm:text-base min-w-0">
             {event.name}
           </h1>
+          {coursePhases.length > 1 && (
+            <>
+              <span className="text-forest-300 shrink-0">/</span>
+              <select
+                className="min-w-0 max-w-[40vw] sm:max-w-[12rem] truncate rounded-md border border-forest-200 bg-white px-1.5 sm:px-2 py-1 text-sm text-forest-800 font-medium"
+                value={Math.min(
+                  coursePhaseIndex,
+                  Math.max(0, coursePhases.length - 1)
+                )}
+                onChange={(e) => setCoursePhaseIndex(Number(e.target.value))}
+                aria-label="Select course"
+              >
+                {coursePhases.map((ph, i) => (
+                  <option key={ph.id} value={i}>
+                    {ph.name}
+                  </option>
+                ))}
+              </select>
+            </>
+          )}
         </div>
         <Link
           href={`/events/${event.id}/setup`}
@@ -656,7 +697,9 @@ export default function SessionWorkspace({
               const deltaSec = synced
                 ? Math.round(synced.deltaMs / 1000)
                 : Math.round(
-                    (analysis.syncDeltasMs?.[t.participant.id] ?? 0) / 1000
+                    (activeCourse?.syncDeltasMs?.[t.participant.id] ??
+                      analysis.syncDeltasMs?.[t.participant.id] ??
+                      0) / 1000
                   );
 
               return (
@@ -1172,29 +1215,6 @@ export default function SessionWorkspace({
               </p>
             ) : (
               <>
-                {coursePhases.length > 0 && (
-                  <select
-                    className="w-full rounded-lg border border-forest-200 px-2 py-2 text-sm"
-                    value={Math.min(
-                      coursePhaseIndex,
-                      Math.max(0, coursePhases.length - 1)
-                    )}
-                    onChange={(e) =>
-                      setCoursePhaseIndex(Number(e.target.value))
-                    }
-                    aria-label="Select course phase"
-                  >
-                    {coursePhases.map((ph, i) => (
-                      <option key={ph.id} value={i}>
-                        {ph.name}
-                        {ph.controlCodes.length
-                          ? ` · ${ph.controlCodes.join("→")}`
-                          : ""}
-                      </option>
-                    ))}
-                  </select>
-                )}
-
                 <div className="flex items-center gap-1.5">
                   <button
                     type="button"

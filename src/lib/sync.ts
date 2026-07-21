@@ -21,6 +21,7 @@ export function legSegmentIndices(
  * Full-course segment following controls in order (S→1→…→F).
  * Required when start and finish are co-located — a direct S→F punch
  * would collapse to a few meters at the start triangle.
+ * Start uses departure (leave base); later controls / F use arrival.
  */
 export function courseSegmentIndices(
   points: TrackPoint[],
@@ -30,8 +31,9 @@ export function courseSegmentIndices(
   if (controls.length < 2 || points.length < 2) return null;
   const punchIndices: number[] = [];
   let searchFrom = 0;
-  for (const c of controls) {
-    const idx = findPunchIndex(points, c, searchFrom, radiusM);
+  for (let i = 0; i < controls.length; i++) {
+    const prefer: PunchPrefer = i === 0 ? "depart" : "arrive";
+    const idx = findPunchIndex(points, controls[i], searchFrom, radiusM, prefer);
     if (idx < 0) return null;
     punchIndices.push(idx);
     searchFrom = idx + 1;
@@ -65,33 +67,126 @@ export function legSegmentPoints(
   return points.slice(idx.fromIdx, idx.toIdx + 1);
 }
 
+/** Soft punch radius when the tight radius never hits. */
+const SOFT_PUNCH_M = 80;
+/** After first entry, snap to closest sample only within this window. */
+const ARRIVE_REFINE_MS = 8_000;
+
+export type PunchPrefer = "arrive" | "depart";
+
+/**
+ * Punch index for a control.
+ * - arrive (default): first entry into radius — finish / intermediate controls.
+ *   Does NOT linger for the closest sample over a long base stay (that made →F
+ *   close only when the next course started at co-located S/F).
+ * - depart: leave the control circle — course start after rest at base.
+ */
 export function findPunchIndex(
   points: TrackPoint[],
   control: { lat: number; lon: number },
   fromIndex = 0,
-  radiusM = PUNCH_RADIUS_M
+  radiusM = PUNCH_RADIUS_M,
+  prefer: PunchPrefer = "arrive"
 ): number {
-  let best = -1;
-  let bestDist = Infinity;
-  for (let i = fromIndex; i < points.length; i++) {
-    const d = haversineM(points[i], control);
-    if (d <= radiusM && d < bestDist) {
-      best = i;
-      bestDist = d;
-      if (i > fromIndex + 5 && d > bestDist + 5) break;
-    }
-    if (best >= 0 && d > radiusM) break;
+  if (prefer === "depart") {
+    return findDeparturePunchIndex(points, control, fromIndex, radiusM);
   }
-  if (best >= 0) return best;
+  return findArrivalPunchIndex(points, control, fromIndex, radiusM);
+}
 
+function findArrivalPunchIndex(
+  points: TrackPoint[],
+  control: { lat: number; lon: number },
+  fromIndex: number,
+  radiusM: number
+): number {
+  const entry = firstEnterIndex(points, control, fromIndex, radiusM);
+  if (entry >= 0) {
+    return refineClosestInStay(points, control, entry, radiusM, ARRIVE_REFINE_MS);
+  }
+  // Soft fallback: first approach within 80m only (not global min over whole track)
+  const soft = firstEnterIndex(points, control, fromIndex, SOFT_PUNCH_M);
+  if (soft < 0) return -1;
+  return refineClosestInStay(
+    points,
+    control,
+    soft,
+    SOFT_PUNCH_M,
+    ARRIVE_REFINE_MS
+  );
+}
+
+function findDeparturePunchIndex(
+  points: TrackPoint[],
+  control: { lat: number; lon: number },
+  fromIndex: number,
+  radiusM: number
+): number {
+  if (fromIndex >= points.length) return -1;
+
+  // Already inside (e.g. resting at base after F): punch = last point before exit
+  if (haversineM(points[fromIndex], control) <= radiusM) {
+    return lastInRadius(points, control, fromIndex, radiusM);
+  }
+
+  // Outside: enter, then leave — start punch is departure of that stay
+  const entry = firstEnterIndex(points, control, fromIndex, radiusM);
+  if (entry >= 0) {
+    return lastInRadius(points, control, entry, radiusM);
+  }
+
+  const soft = firstEnterIndex(points, control, fromIndex, SOFT_PUNCH_M);
+  if (soft < 0) return -1;
+  return lastInRadius(points, control, soft, SOFT_PUNCH_M);
+}
+
+function firstEnterIndex(
+  points: TrackPoint[],
+  control: { lat: number; lon: number },
+  fromIndex: number,
+  radiusM: number
+): number {
   for (let i = fromIndex; i < points.length; i++) {
+    if (haversineM(points[i], control) <= radiusM) return i;
+  }
+  return -1;
+}
+
+function lastInRadius(
+  points: TrackPoint[],
+  control: { lat: number; lon: number },
+  fromIndex: number,
+  radiusM: number
+): number {
+  let last = fromIndex;
+  for (let i = fromIndex; i < points.length; i++) {
+    if (haversineM(points[i], control) <= radiusM) last = i;
+    else break;
+  }
+  return last;
+}
+
+/** Closest sample in the stay, but only shortly after first entry. */
+function refineClosestInStay(
+  points: TrackPoint[],
+  control: { lat: number; lon: number },
+  entry: number,
+  radiusM: number,
+  refineMs: number
+): number {
+  let best = entry;
+  let bestDist = haversineM(points[entry], control);
+  const t0 = points[entry].time;
+  for (let i = entry + 1; i < points.length; i++) {
+    if (points[i].time - t0 > refineMs) break;
     const d = haversineM(points[i], control);
+    if (d > radiusM) break;
     if (d < bestDist) {
-      bestDist = d;
       best = i;
+      bestDist = d;
     }
   }
-  return bestDist <= 80 ? best : -1;
+  return best;
 }
 
 /** Whether a track comes within punch radius of a control (any point). */
@@ -143,7 +238,13 @@ function controlPunchAbs(
   if (kind === "start_punch") {
     const target = geo[0];
     if (target.lat == null || target.lon == null) return null;
-    const idx = findPunchIndex(points, { lat: target.lat, lon: target.lon });
+    const idx = findPunchIndex(
+      points,
+      { lat: target.lat, lon: target.lon },
+      0,
+      PUNCH_RADIUS_M,
+      "depart"
+    );
     return idx >= 0 ? points[idx].time : null;
   }
 
@@ -174,6 +275,117 @@ function controlPunchAbs(
     fromIndex
   );
   return idx >= 0 ? points[idx].time : null;
+}
+
+/** Real-time window for one course attempt on a raw (unsynced) track. */
+export interface CourseWindow {
+  phaseId: string;
+  fromIdx: number;
+  toIdx: number;
+  tStart: number;
+  tEnd: number;
+}
+
+/**
+ * Split a raw GPX into course windows using day-plan control order.
+ * Uses real GPS timestamps only — no sync offsets. Walks time-forward so
+ * the same control loop can appear as separate courses.
+ */
+export function splitDayIntoCourseWindows(
+  points: TrackPoint[],
+  dayPhases: { id: string; kind: string; controlCodes: string[] }[],
+  controls: ControlRow[]
+): CourseWindow[] {
+  const byCode = new Map(
+    controls
+      .filter((c) => c.lat != null && c.lon != null)
+      .map((c) => [c.code, { lat: c.lat!, lon: c.lon! }])
+  );
+  const out: CourseWindow[] = [];
+  if (points.length < 2) return out;
+
+  let searchFrom = 0;
+  for (const phase of dayPhases) {
+    if (phase.kind !== "course" || (phase.controlCodes?.length ?? 0) < 2) {
+      continue;
+    }
+
+    const coursePts: { lat: number; lon: number }[] = [];
+    let codesOk = true;
+    for (const code of phase.controlCodes) {
+      const pt = byCode.get(code);
+      if (!pt) {
+        codesOk = false;
+        break;
+      }
+      coursePts.push(pt);
+    }
+    if (!codesOk) continue;
+
+    const punchIndices: number[] = [];
+    let from = searchFrom;
+    let complete = true;
+    for (let ci = 0; ci < coursePts.length; ci++) {
+      const prefer: PunchPrefer = ci === 0 ? "depart" : "arrive";
+      const idx = findPunchIndex(points, coursePts[ci], from, PUNCH_RADIUS_M, prefer);
+      if (idx < 0) {
+        complete = false;
+        break;
+      }
+      punchIndices.push(idx);
+      from = idx + 1;
+    }
+
+    if (punchIndices.length > 0) {
+      searchFrom = punchIndices[punchIndices.length - 1] + 1;
+    }
+    if (!complete || punchIndices.length < 2) continue;
+
+    const fromIdx = punchIndices[0];
+    const toIdx = punchIndices[punchIndices.length - 1];
+    if (toIdx <= fromIdx) continue;
+
+    out.push({
+      phaseId: phase.id,
+      fromIdx,
+      toIdx,
+      tStart: points[fromIdx].time,
+      tEnd: points[toIdx].time,
+    });
+  }
+
+  return out;
+}
+
+/**
+ * Match one course (ordered controls) on a raw track starting at fromIndex.
+ * Advances only within this call; caller owns the day-level cursor.
+ */
+export function matchCourseWindow(
+  points: TrackPoint[],
+  orderedControls: { lat: number; lon: number }[],
+  fromIndex = 0
+): { fromIdx: number; toIdx: number; punchIndices: number[] } | null {
+  if (orderedControls.length < 2 || points.length < 2) return null;
+  const punchIndices: number[] = [];
+  let searchFrom = fromIndex;
+  for (let i = 0; i < orderedControls.length; i++) {
+    const prefer: PunchPrefer = i === 0 ? "depart" : "arrive";
+    const idx = findPunchIndex(
+      points,
+      orderedControls[i],
+      searchFrom,
+      PUNCH_RADIUS_M,
+      prefer
+    );
+    if (idx < 0) return null;
+    punchIndices.push(idx);
+    searchFrom = idx + 1;
+  }
+  const fromIdx = punchIndices[0];
+  const toIdx = punchIndices[punchIndices.length - 1];
+  if (toIdx <= fromIdx) return null;
+  return { fromIdx, toIdx, punchIndices };
 }
 
 /**
@@ -207,13 +419,20 @@ export function computeDayRaceWindow(
     let lastPunch = -1;
     let ok = true;
     for (const course of courses) {
-      for (const code of course.controlCodes) {
-        const pt = byCode.get(code);
+      for (let ci = 0; ci < course.controlCodes.length; ci++) {
+        const pt = byCode.get(course.controlCodes[ci]);
         if (!pt) {
           ok = false;
           break;
         }
-        const idx = findPunchIndex(t.points, pt, searchFrom);
+        const prefer: PunchPrefer = ci === 0 ? "depart" : "arrive";
+        const idx = findPunchIndex(
+          t.points,
+          pt,
+          searchFrom,
+          PUNCH_RADIUS_M,
+          prefer
+        );
         if (idx < 0) {
           ok = false;
           break;

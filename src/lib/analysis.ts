@@ -4,6 +4,7 @@ import {
   applyOffset,
   computeReferenceSync,
   findPunchIndex,
+  matchCourseWindow,
 } from "./sync";
 import { detectHesitations } from "./hesitation";
 import { applyDecisionQuality } from "./decisionQuality";
@@ -134,8 +135,10 @@ function buildOverallFromOrdered(
     let from = searchFrom;
     const punchIndices: number[] = [];
     let ok = true;
-    for (const pt of coursePts) {
-      const idx = findPunchIndex(points, pt, from);
+    for (let ci = 0; ci < coursePts.length; ci++) {
+      // Start = leave base; F / intermediates = arrive (not dwell until next start)
+      const prefer = ci === 0 ? "depart" : "arrive";
+      const idx = findPunchIndex(points, coursePts[ci], from, undefined, prefer);
       if (idx < 0) {
         ok = false;
         break;
@@ -207,9 +210,35 @@ function buildOverallFromOrdered(
   };
 }
 
+function emptyCoursePhase(
+  phase: DayPhaseRow,
+  runners: RunnerTrack[]
+): AnalysisCoursePhase {
+  const syncOffsets: Record<string, number> = {};
+  const syncDeltasMs: Record<string, number> = {};
+  for (const r of runners) {
+    syncOffsets[r.participant.id] = 0;
+    syncDeltasMs[r.participant.id] = 0;
+  }
+  return {
+    id: phase.id,
+    name: phase.name,
+    sortOrder: phase.sort_order,
+    controlCodes: phase.controlCodes,
+    overall: null,
+    legs: [],
+    syncOffsets,
+    syncDeltasMs,
+    referenceId: null,
+    referenceWallTimeMs: null,
+    windows: {},
+  };
+}
+
 /**
- * Analyze event using the day plan. Course phases are matched time-forward
- * so the same control order can appear twice as separate attempts.
+ * Analyze event using the day plan:
+ * 1) Split each runner into course windows on real GPS time (no sync).
+ * 2) Sync + analyze each course independently (legacy single-course logic).
  */
 export function analyzeEvent(
   referenceId: string | null,
@@ -218,39 +247,10 @@ export function analyzeEvent(
   dayPhases: DayPhaseRow[]
 ): AnalysisPayload {
   const byCode = new Map(controls.map((c) => [c.code, c]));
-  const geoForSync = [...controls]
-    .filter((c) => c.lat != null && c.lon != null)
-    .sort((a, b) => a.sequence - b.sequence);
 
-  // Prefer first course phase order for sync punch strategies
-  const firstCourse = dayPhases.find((p) => p.kind === "course");
-  const syncControls =
-    firstCourse && firstCourse.controlCodes.length >= 1
-      ? (resolveOrderedControls(firstCourse.controlCodes, byCode) ?? geoForSync)
-      : geoForSync;
-
-  const sync = computeReferenceSync(
-    referenceId,
-    runners.map((r) => ({
-      id: r.participant.id,
-      points: r.points,
-      strategy: (r.participant.sync_strategy || "motion_start") as SyncStrategy,
-      manualDeltaMs: r.track.start_offset_ms,
-    })),
-    syncControls
-  );
-
-  const synced: { runner: RunnerTrack; points: TrackPoint[] }[] = [];
-  for (const runner of runners) {
-    const finalOffset = sync.offsets[runner.participant.id] ?? 0;
-    synced.push({
-      runner,
-      points: applyOffset(runner.points, finalOffset),
-    });
-  }
-
-  const cursors: Record<string, number> = {};
-  for (const s of synced) cursors[s.runner.participant.id] = 0;
+  // Per-runner cursor on raw tracks — advances only with successful course matches
+  const rawCursors: Record<string, number> = {};
+  for (const r of runners) rawCursors[r.participant.id] = 0;
 
   const coursePhases: AnalysisCoursePhase[] = [];
 
@@ -258,31 +258,62 @@ export function analyzeEvent(
     if (phase.kind !== "course") continue;
     const ordered = resolveOrderedControls(phase.controlCodes, byCode);
     if (!ordered) {
-      coursePhases.push({
-        id: phase.id,
-        name: phase.name,
-        sortOrder: phase.sort_order,
-        controlCodes: phase.controlCodes,
-        overall: null,
-        legs: [],
-      });
+      coursePhases.push(emptyCoursePhase(phase, runners));
       continue;
     }
 
-    // Snapshot cursors before legs so overall uses same phase window start;
-    // then advance via overall (full course walk). Legs use independent
-    // per-leg punches within the phase by temporarily walking from phase start.
-    const phaseStart: Record<string, number> = { ...cursors };
+    const coursePts = ordered.map((c) => ({ lat: c.lat!, lon: c.lon! }));
+    const windows: Record<string, { fromIdx: number; toIdx: number }> = {};
+    const sliced: { runner: RunnerTrack; points: TrackPoint[] }[] = [];
+
+    for (const runner of runners) {
+      const id = runner.participant.id;
+      const searchFrom = rawCursors[id] ?? 0;
+      const win = matchCourseWindow(runner.points, coursePts, searchFrom);
+      if (!win) {
+        sliced.push({ runner, points: [] });
+        continue;
+      }
+      rawCursors[id] = win.toIdx + 1;
+      windows[id] = { fromIdx: win.fromIdx, toIdx: win.toIdx };
+      sliced.push({
+        runner,
+        points: runner.points.slice(win.fromIdx, win.toIdx + 1),
+      });
+    }
+
+    // Sync only within this course's real-time slices
+    const sync = computeReferenceSync(
+      referenceId,
+      sliced.map(({ runner, points }) => ({
+        id: runner.participant.id,
+        points,
+        strategy: (runner.participant.sync_strategy ||
+          "motion_start") as SyncStrategy,
+        manualDeltaMs: runner.track.start_offset_ms,
+      })),
+      ordered
+    );
+
+    const synced = sliced.map(({ runner, points }) => ({
+      runner,
+      points: applyOffset(points, sync.offsets[runner.participant.id] ?? 0),
+    }));
+
+    const legCursors: Record<string, number> = {};
+    const overallCursors: Record<string, number> = {};
+    for (const s of synced) {
+      legCursors[s.runner.participant.id] = 0;
+      overallCursors[s.runner.participant.id] = 0;
+    }
 
     const legs: AnalysisLeg[] = [];
-    const legCursors = { ...phaseStart };
     for (let i = 0; i < ordered.length - 1; i++) {
       legs.push(
         buildLegFromOrdered(synced, ordered[i], ordered[i + 1], legCursors)
       );
     }
-
-    const overall = buildOverallFromOrdered(synced, ordered, cursors);
+    const overall = buildOverallFromOrdered(synced, ordered, overallCursors);
 
     coursePhases.push({
       id: phase.id,
@@ -291,19 +322,23 @@ export function analyzeEvent(
       controlCodes: phase.controlCodes,
       overall,
       legs,
+      syncOffsets: sync.offsets,
+      syncDeltasMs: sync.deltasMs,
+      referenceId: sync.referenceId,
+      referenceWallTimeMs: sync.referenceWallTimeMs,
+      windows,
     });
   }
 
-  // Compat: first course phase
   const first = coursePhases[0];
   return {
     coursePhases,
     overall: first?.overall ?? null,
     legs: first?.legs ?? [],
-    syncOffsets: sync.offsets,
-    syncDeltasMs: sync.deltasMs,
-    referenceId: sync.referenceId,
-    referenceWallTimeMs: sync.referenceWallTimeMs,
+    syncOffsets: first?.syncOffsets ?? {},
+    syncDeltasMs: first?.syncDeltasMs ?? {},
+    referenceId: first?.referenceId ?? referenceId,
+    referenceWallTimeMs: first?.referenceWallTimeMs ?? null,
   };
 }
 

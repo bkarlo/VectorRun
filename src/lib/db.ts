@@ -148,9 +148,9 @@ function migrate(database: Database.Database) {
   const userVersion = Number(
     database.pragma("user_version", { simple: true }) ?? 0
   );
-  if (userVersion < 10) {
+  if (userVersion < 12) {
     database.exec(`DELETE FROM analysis_cache`);
-    database.pragma("user_version = 10");
+    database.pragma("user_version = 12");
   }
 }
 

@@ -6,9 +6,13 @@ export interface SpeedSample {
   speedMps: number;
 }
 
+/** Don't linearly blend speed across gaps longer than this. */
+const MAX_INTERP_MS = 4_000;
+
 /**
  * Instantaneous speed samples from consecutive GPS points.
- * Drops absurd spikes (GPS jumps) and gaps.
+ * Drops absurd spikes. Long gaps (standing still / GPS pause) are filled
+ * with zero so the chart doesn't hold the previous running speed.
  */
 export function speedProfile(
   points: TrackPoint[],
@@ -20,7 +24,17 @@ export function speedProfile(
 
   for (let i = 1; i < points.length; i++) {
     const dt = points[i].time - points[i - 1].time;
-    if (dt <= 0 || dt > maxGap) continue;
+    if (dt <= 0) continue;
+
+    if (dt > maxGap) {
+      // No usable motion sample across this gap — mark as stopped
+      const t0 = points[i - 1].time;
+      const t1 = points[i].time;
+      out.push({ time: t0 + Math.min(500, dt / 3), speedMps: 0 });
+      out.push({ time: t1 - Math.min(500, dt / 3), speedMps: 0 });
+      continue;
+    }
+
     const dist = haversineM(points[i - 1], points[i]);
     const speed = dist / (dt / 1000);
     if (!Number.isFinite(speed) || speed < 0 || speed > maxSpeed) continue;
@@ -30,7 +44,7 @@ export function speedProfile(
   return smoothSpeed(out, 5);
 }
 
-/** Simple moving-average smooth (odd window). */
+/** Simple moving-average smooth (odd window); ignores neighbors far in time. */
 function smoothSpeed(samples: SpeedSample[], window: number): SpeedSample[] {
   if (samples.length === 0 || window < 3) return samples;
   const half = Math.floor(window / 2);
@@ -39,6 +53,7 @@ function smoothSpeed(samples: SpeedSample[], window: number): SpeedSample[] {
     let n = 0;
     for (let j = i - half; j <= i + half; j++) {
       if (j < 0 || j >= samples.length) continue;
+      if (Math.abs(samples[j].time - s.time) > MAX_INTERP_MS) continue;
       sum += samples[j].speedMps;
       n += 1;
     }
@@ -65,6 +80,14 @@ export function speedAtTime(
   const a = samples[lo];
   const b = samples[hi];
   const span = b.time - a.time || 1;
+
+  // Across a long hole between samples, don't fake a glide of the previous pace
+  if (span > MAX_INTERP_MS) {
+    if (t - a.time <= MAX_INTERP_MS / 2) return a.speedMps;
+    if (b.time - t <= MAX_INTERP_MS / 2) return b.speedMps;
+    return 0;
+  }
+
   const u = (t - a.time) / span;
   return a.speedMps + (b.speedMps - a.speedMps) * u;
 }

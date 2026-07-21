@@ -553,10 +553,13 @@ export function getOrComputeAnalysis(eventId: string): AnalysisPayload {
   if (cached) {
     const payload = JSON.parse(cached.payload_json) as AnalysisPayload;
     // Old cache shape — recompute
+    const firstPhase = payload.coursePhases?.[0];
     if (
       payload.syncDeltasMs === undefined ||
       payload.referenceId === undefined ||
-      payload.coursePhases === undefined
+      payload.coursePhases === undefined ||
+      firstPhase?.syncOffsets === undefined ||
+      firstPhase?.windows === undefined
     ) {
       invalidateAnalysis(eventId);
     } else {

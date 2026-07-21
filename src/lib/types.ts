@@ -221,6 +221,13 @@ export interface AnalysisCoursePhase {
   controlCodes: string[];
   overall: AnalysisLeg | null;
   legs: AnalysisLeg[];
+  /** Sync for this course only (independent of other courses). */
+  syncOffsets: Record<string, number>;
+  syncDeltasMs: Record<string, number>;
+  referenceId: string | null;
+  referenceWallTimeMs: number | null;
+  /** Real-time raw-track indices (fromIdx→toIdx) per participant for this course. */
+  windows: Record<string, { fromIdx: number; toIdx: number }>;
 }
 
 export interface AnalysisPayload {
@@ -232,6 +239,7 @@ export interface AnalysisPayload {
    */
   overall: AnalysisLeg | null;
   legs: AnalysisLeg[];
+  /** Compat: first course sync. Prefer coursePhases[i].sync*. */
   syncOffsets: Record<string, number>;
   syncDeltasMs: Record<string, number>;
   referenceId: string | null;
