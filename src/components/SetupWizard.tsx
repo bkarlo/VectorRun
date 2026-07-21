@@ -3,8 +3,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import Link from "next/link";
-import type { GeorefPair, TrackPoint } from "@/lib/types";
-import { actionSaveGeoref, actionSaveControls, actionSaveMapOpacity, actionSaveRaceWindow } from "@/app/actions";
+import type { DayPhaseKind, GeorefPair, TrackPoint } from "@/lib/types";
+import {
+  actionSaveGeoref,
+  actionSaveControls,
+  actionSaveDayPlan,
+  actionSaveMapOpacity,
+  actionSaveRaceWindow,
+} from "@/app/actions";
 import { fitAffine, gpsToMap } from "@/lib/georef";
 import { trackTouchesControl } from "@/lib/sync";
 
@@ -39,9 +45,20 @@ interface Props {
   tracks: SetupTrack[];
   initialMapOpacity?: number;
   initialRaceWindowEnabled?: boolean;
+  initialDayPhases?: {
+    kind: DayPhaseKind;
+    name: string;
+    controlCodes: string[];
+  }[];
 }
 
-type Mode = "place" | "points" | "controls";
+type Mode = "place" | "points" | "controls" | "day";
+
+interface DayPhaseDraft {
+  kind: DayPhaseKind;
+  name: string;
+  controlCodes: string[];
+}
 
 export default function SetupWizard(props: Props) {
   const [mapUrl, setMapUrl] = useState(
@@ -75,6 +92,16 @@ export default function SetupWizard(props: Props) {
     props.initialRaceWindowEnabled !== false
   );
   const [raceWindowStatus, setRaceWindowStatus] = useState("");
+  const [dayPhases, setDayPhases] = useState<DayPhaseDraft[]>(() =>
+    props.initialDayPhases?.length
+      ? props.initialDayPhases.map((p) => ({
+          kind: p.kind,
+          name: p.name,
+          controlCodes: [...p.controlCodes],
+        }))
+      : []
+  );
+  const [dayStatus, setDayStatus] = useState("");
   const imgRef = useRef<HTMLImageElement>(null);
   const codeInputRefs = useRef<(HTMLInputElement | null)[]>([]);
 
@@ -208,6 +235,22 @@ export default function SetupWizard(props: Props) {
     setStatus("Controls saved");
   };
 
+  const saveDay = async () => {
+    await actionSaveDayPlan(
+      props.eventId,
+      dayPhases.map((p) => ({
+        kind: p.kind,
+        name: p.name,
+        controlCodes: p.kind === "course" ? p.controlCodes : [],
+      }))
+    );
+    setDayStatus("Day plan saved");
+  };
+
+  const controlCodeOptions = controls
+    .filter((c) => c.code.trim())
+    .map((c) => c.code);
+
   const placedGpsControls = controls
     .filter((c) => c.lat != null && c.lon != null)
     .map((c) => ({
@@ -319,8 +362,8 @@ export default function SetupWizard(props: Props) {
             Race window
           </h3>
           <p className="text-xs text-forest-600">
-            Scope the session timeline to first control → last control and dim
-            warm-up / cool-down on the map. Turn off to scrub the full GPX.
+            Scope the session timeline from the first course start to the last
+            course finish (includes rest between courses; dims walk-in/out).
           </p>
         </div>
         <label className="flex items-center gap-2 text-sm text-forest-800 cursor-pointer">
@@ -378,13 +421,257 @@ export default function SetupWizard(props: Props) {
           >
             Controls
           </button>
+          <button
+            type="button"
+            className={`px-3 py-2 ${
+              mode === "day" ? "bg-forest-100 font-medium" : "bg-white"
+            }`}
+            onClick={() => setMode("day")}
+            title="Walk-in, courses, rest, walk-back"
+          >
+            Define the day
+          </button>
         </div>
         {status && (
           <span className="text-sm text-forest-600 font-mono">{status}</span>
         )}
       </div>
 
-      {mode === "place" && mapUrl && mapSize.w > 0 ? (
+      {mode === "day" ? (
+        <div className="panel rounded-xl p-4 space-y-4">
+          <div>
+            <h3 className="font-display text-lg text-forest-900">
+              Define the day
+            </h3>
+            <p className="text-sm text-forest-600 mt-1">
+              Order the session: walk there, courses (same loop can appear
+              twice), rest at base, walk back. Place controls first, then build
+              this timeline.
+            </p>
+          </div>
+
+          {controlCodeOptions.length < 2 && (
+            <p className="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+              Add at least two named controls (with GPS) before creating course
+              phases.
+            </p>
+          )}
+
+          <ul className="space-y-3">
+            {dayPhases.map((phase, i) => (
+              <li
+                key={i}
+                className="rounded-lg border border-forest-200 bg-white p-3 space-y-2"
+              >
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-mono text-xs text-forest-500 w-6">
+                    {i + 1}.
+                  </span>
+                  <select
+                    className="rounded border border-forest-200 px-2 py-1.5 text-sm"
+                    value={phase.kind}
+                    onChange={(e) => {
+                      const kind = e.target.value as DayPhaseKind;
+                      setDayPhases((prev) =>
+                        prev.map((p, j) =>
+                          j === i
+                            ? {
+                                ...p,
+                                kind,
+                                controlCodes:
+                                  kind === "course" ? p.controlCodes : [],
+                              }
+                            : p
+                        )
+                      );
+                    }}
+                  >
+                    <option value="transit">Walk / transit</option>
+                    <option value="rest">Rest at base</option>
+                    <option value="course">Course</option>
+                  </select>
+                  <input
+                    className="min-w-0 flex-1 rounded border border-forest-200 px-2 py-1.5 text-sm"
+                    value={phase.name}
+                    onChange={(e) => {
+                      const name = e.target.value;
+                      setDayPhases((prev) =>
+                        prev.map((p, j) => (j === i ? { ...p, name } : p))
+                      );
+                    }}
+                    placeholder="Name"
+                  />
+                  <button
+                    type="button"
+                    className="text-xs text-forest-600 px-2 py-1 disabled:opacity-30"
+                    disabled={i === 0}
+                    onClick={() =>
+                      setDayPhases((prev) => {
+                        if (i <= 0) return prev;
+                        const next = [...prev];
+                        const tmp = next[i - 1];
+                        next[i - 1] = next[i];
+                        next[i] = tmp;
+                        return next;
+                      })
+                    }
+                  >
+                    Up
+                  </button>
+                  <button
+                    type="button"
+                    className="text-xs text-forest-600 px-2 py-1 disabled:opacity-30"
+                    disabled={i >= dayPhases.length - 1}
+                    onClick={() =>
+                      setDayPhases((prev) => {
+                        if (i >= prev.length - 1) return prev;
+                        const next = [...prev];
+                        const tmp = next[i];
+                        next[i] = next[i + 1];
+                        next[i + 1] = tmp;
+                        return next;
+                      })
+                    }
+                  >
+                    Down
+                  </button>
+                  <button
+                    type="button"
+                    className="text-red-600 text-sm px-2"
+                    onClick={() =>
+                      setDayPhases((prev) => prev.filter((_, j) => j !== i))
+                    }
+                  >
+                    ×
+                  </button>
+                </div>
+
+                {phase.kind === "course" && (
+                  <div className="pl-8 space-y-2">
+                    <div className="flex flex-wrap gap-1 items-center">
+                      {phase.controlCodes.length === 0 ? (
+                        <span className="text-xs text-forest-500 italic">
+                          No order yet — add controls below
+                        </span>
+                      ) : (
+                        phase.controlCodes.map((code, ci) => (
+                          <span
+                            key={`${code}-${ci}`}
+                            className="inline-flex items-center gap-1 rounded bg-forest-50 border border-forest-200 px-1.5 py-0.5 text-xs font-mono"
+                          >
+                            {code}
+                            <button
+                              type="button"
+                              className="text-forest-500 hover:text-red-600"
+                              onClick={() =>
+                                setDayPhases((prev) =>
+                                  prev.map((p, j) =>
+                                    j === i
+                                      ? {
+                                          ...p,
+                                          controlCodes: p.controlCodes.filter(
+                                            (_, k) => k !== ci
+                                          ),
+                                        }
+                                      : p
+                                  )
+                                )
+                              }
+                            >
+                              ×
+                            </button>
+                            {ci < phase.controlCodes.length - 1 ? (
+                              <span className="text-forest-400">→</span>
+                            ) : null}
+                          </span>
+                        ))
+                      )}
+                    </div>
+                    <div className="flex flex-wrap gap-1">
+                      {controlCodeOptions.map((code) => (
+                        <button
+                          key={code}
+                          type="button"
+                          className="rounded border border-forest-200 px-2 py-0.5 text-xs font-mono hover:bg-forest-50"
+                          onClick={() =>
+                            setDayPhases((prev) =>
+                              prev.map((p, j) =>
+                                j === i
+                                  ? {
+                                      ...p,
+                                      controlCodes: [...p.controlCodes, code],
+                                    }
+                                  : p
+                              )
+                            )
+                          }
+                        >
+                          + {code}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </li>
+            ))}
+          </ul>
+
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              className="rounded-lg border border-forest-200 px-3 py-1.5 text-sm"
+              onClick={() =>
+                setDayPhases((prev) => [
+                  ...prev,
+                  { kind: "transit", name: "Walk there", controlCodes: [] },
+                ])
+              }
+            >
+              + Walk
+            </button>
+            <button
+              type="button"
+              className="rounded-lg border border-forest-200 px-3 py-1.5 text-sm"
+              onClick={() =>
+                setDayPhases((prev) => [
+                  ...prev,
+                  { kind: "rest", name: "Rest", controlCodes: [] },
+                ])
+              }
+            >
+              + Rest
+            </button>
+            <button
+              type="button"
+              className="rounded-lg border border-forest-200 px-3 py-1.5 text-sm"
+              onClick={() =>
+                setDayPhases((prev) => [
+                  ...prev,
+                  {
+                    kind: "course",
+                    name: `Course ${prev.filter((p) => p.kind === "course").length + 1}`,
+                    controlCodes: [],
+                  },
+                ])
+              }
+            >
+              + Course
+            </button>
+            <button
+              type="button"
+              className="rounded-lg bg-forest-700 text-white px-4 py-1.5 text-sm font-medium ml-auto"
+              onClick={() => void saveDay()}
+            >
+              Save day plan
+            </button>
+            {dayStatus && (
+              <span className="text-xs font-mono text-forest-600 self-center">
+                {dayStatus}
+              </span>
+            )}
+          </div>
+        </div>
+      ) : mode === "place" && mapUrl && mapSize.w > 0 ? (
         <div className="panel rounded-xl p-4">
           <MapOverlayFit
             key={mapUrl}

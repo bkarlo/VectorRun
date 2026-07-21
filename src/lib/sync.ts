@@ -177,9 +177,67 @@ function controlPunchAbs(
 }
 
 /**
- * Shared race window on the synced timeline:
- * earliest course start punch → latest course finish punch,
- * walking controls in order (handles co-located S/F).
+ * Race window for a training day: earliest first-control punch of the first
+ * course phase → latest last-control punch of the last course phase
+ * (time-forward across phases). Includes rest between courses; excludes
+ * walk-in / walk-out outside that span.
+ */
+export function computeDayRaceWindow(
+  tracks: { points: TrackPoint[] }[],
+  controls: ControlRow[],
+  dayPhases: { kind: string; controlCodes: string[] }[]
+): { min: number; max: number } | null {
+  const byCode = new Map(
+    controls
+      .filter((c) => c.lat != null && c.lon != null)
+      .map((c) => [c.code, { lat: c.lat!, lon: c.lon! }])
+  );
+  const courses = dayPhases.filter(
+    (p) => p.kind === "course" && (p.controlCodes?.length ?? 0) >= 2
+  );
+  if (courses.length === 0 || tracks.length === 0) return null;
+
+  let minFrom = Infinity;
+  let maxTo = -Infinity;
+
+  for (const t of tracks) {
+    if (t.points.length < 2) continue;
+    let searchFrom = 0;
+    let firstPunch = -1;
+    let lastPunch = -1;
+    let ok = true;
+    for (const course of courses) {
+      for (const code of course.controlCodes) {
+        const pt = byCode.get(code);
+        if (!pt) {
+          ok = false;
+          break;
+        }
+        const idx = findPunchIndex(t.points, pt, searchFrom);
+        if (idx < 0) {
+          ok = false;
+          break;
+        }
+        if (firstPunch < 0) firstPunch = idx;
+        lastPunch = idx;
+        searchFrom = idx + 1;
+      }
+      if (!ok) break;
+    }
+    if (!ok || firstPunch < 0 || lastPunch <= firstPunch) continue;
+    minFrom = Math.min(minFrom, t.points[firstPunch].time);
+    maxTo = Math.max(maxTo, t.points[lastPunch].time);
+  }
+
+  if (!Number.isFinite(minFrom) || !Number.isFinite(maxTo) || maxTo <= minFrom) {
+    return null;
+  }
+  return { min: minFrom, max: maxTo + 1_000 };
+}
+
+/**
+ * Shared race window on the synced timeline (legacy single-course helper).
+ * Prefer computeDayRaceWindow when a day plan exists.
  */
 export function computeRaceWindow(
   tracks: { points: TrackPoint[] }[],
@@ -205,7 +263,6 @@ export function computeRaceWindow(
   if (!Number.isFinite(minFrom) || !Number.isFinite(maxTo) || maxTo <= minFrom) {
     return null;
   }
-  // Small pad so avatars aren't clipped at the endpoints
   const pad = 1_000;
   return { min: minFrom, max: maxTo + pad };
 }

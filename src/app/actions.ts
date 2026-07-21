@@ -9,6 +9,7 @@ import {
   deleteParticipant,
   renameParticipant,
   replaceControls,
+  replaceDayPlan,
   saveGeoref,
   saveMapOpacity,
   setManualDelta,
@@ -19,6 +20,7 @@ import {
 } from "@/lib/events";
 import type {
   ControlRow,
+  DayPhaseKind,
   ExerciseType,
   GeorefPair,
   SyncStrategy,
@@ -65,6 +67,19 @@ export async function actionSaveRaceWindow(
   enabled: boolean
 ) {
   setRaceWindowEnabled(eventId, enabled);
+  revalidatePath(`/events/${eventId}/setup`);
+  revalidatePath(`/events/${eventId}`);
+}
+
+export async function actionSaveDayPlan(
+  eventId: string,
+  phases: {
+    kind: DayPhaseKind;
+    name: string;
+    controlCodes?: string[];
+  }[]
+) {
+  replaceDayPlan(eventId, phases);
   revalidatePath(`/events/${eventId}/setup`);
   revalidatePath(`/events/${eventId}`);
 }

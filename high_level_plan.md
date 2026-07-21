@@ -494,20 +494,13 @@ Those features would move VectorRun from being a visualization tool to becoming 
 
 Events, optional georeferenced map, controls, GPX upload, sync strategies, multi-runner replay, speed chart, and per-leg splits (time / distance / climb / pace).
 
-### Milestone 1B — Leg storytelling (current)
+### Milestone 1B — Leg storytelling (shipped)
 
-Turn each selected leg into an explainable story for coaching later:
+Per-leg corridor, hesitation, peer-anchored decision signals, Overall S→F via ordered course punches.
 
-* Shared punch-based leg segment helper (`legSegmentIndices` / `legSegmentPoints`).
-* Map: dim full course tracks; emphasize all punched routes on the active leg.
-* Hesitation detection (low-speed clusters) stored on `LegSplit.hesitations`.
-* Peer-anchored decision quality (not an abstract ideal line):
-  * **Come-back** — solo geometric reverse toward the next control after overshooting.
-  * **vsBest** — time + distance vs the fastest punched runner on that leg.
-  * **Detours** — contiguous deviation from the fastest runner’s polyline.
-* Surface on map markers, speed-chart ticks, and splits badges.
+### Milestone 1B+ — Training day plan (current)
 
-This payload is the structured evidence a future AI coach will narrate.
+Ordered **day phases** (transit / rest / course) so one GPX can hold walk-in, several mini-courses (including the same loop twice), rest at base, and walk-back. Setup separates **Controls** from **Define the day**. Race window spans first course S → last course F.
 
 ### Milestone 1C — Clustering + AI coach (next)
 

@@ -50,6 +50,46 @@ export function parseGpx(xml: string): TrackPoint[] {
   return points;
 }
 
+function escapeXml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+/** Rebuild a simple GPX 1.1 track from stored points (original file is not kept). */
+export function serializeGpx(
+  points: TrackPoint[],
+  opts?: { name?: string }
+): string {
+  const name = escapeXml(opts?.name?.trim() || "VectorRun track");
+  const trkpts = points
+    .map((p) => {
+      const ele =
+        p.ele != null && Number.isFinite(p.ele)
+          ? `\n        <ele>${p.ele}</ele>`
+          : "";
+      const time =
+        p.time > 0
+          ? `\n        <time>${new Date(p.time).toISOString()}</time>`
+          : "";
+      return `      <trkpt lat="${p.lat}" lon="${p.lon}">${ele}${time}\n      </trkpt>`;
+    })
+    .join("\n");
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="VectorRun" xmlns="http://www.topografix.com/GPX/1/1">
+  <trk>
+    <name>${name}</name>
+    <trkseg>
+${trkpts}
+    </trkseg>
+  </trk>
+</gpx>
+`;
+}
+
 export function haversineM(
   a: { lat: number; lon: number },
   b: { lat: number; lon: number }

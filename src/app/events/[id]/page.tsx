@@ -18,6 +18,7 @@ export default async function EventSessionPage({
       event={bundle.event}
       map={bundle.map ?? null}
       controls={bundle.controls}
+      dayPhases={bundle.dayPhases}
       tracks={bundle.tracks.map((t) => ({
         ...t,
         track: t.track ?? null,

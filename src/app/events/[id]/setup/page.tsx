@@ -2,7 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import SetupWizard from "@/components/SetupWizard";
 import { actionUpdateEventMeta } from "@/app/actions";
-import { getEvent, getMap, listControls, listSetupTracks } from "@/lib/events";
+import { getEvent, getMap, listControls, listDayPhases, listSetupTracks } from "@/lib/events";
 import {
   EXERCISE_LABELS,
   type ExerciseType,
@@ -21,6 +21,7 @@ export default async function SetupPage({
   if (!event) notFound();
   const map = getMap(id);
   const controls = listControls(id);
+  const dayPhases = listDayPhases(id);
   const tracks = listSetupTracks(id);
   const georef: GeorefPair[] = map
     ? (JSON.parse(map.georef_json) as GeorefPair[])
@@ -108,6 +109,11 @@ export default async function SetupPage({
           tracks={tracks}
           initialMapOpacity={map?.opacity ?? 0.55}
           initialRaceWindowEnabled={event.race_window_enabled !== false}
+          initialDayPhases={dayPhases.map((p) => ({
+            kind: p.kind,
+            name: p.name,
+            controlCodes: p.controlCodes,
+          }))}
         />
       </div>
     </main>

@@ -127,13 +127,30 @@ function migrate(database: Database.Database) {
     );
   }
 
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS day_phases (
+      id TEXT PRIMARY KEY,
+      event_id TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+      kind TEXT NOT NULL,
+      name TEXT NOT NULL,
+      sort_order INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS phase_controls (
+      phase_id TEXT NOT NULL REFERENCES day_phases(id) ON DELETE CASCADE,
+      sequence INTEGER NOT NULL,
+      control_code TEXT NOT NULL,
+      PRIMARY KEY (phase_id, sequence)
+    );
+    CREATE INDEX IF NOT EXISTS idx_day_phases_event ON day_phases(event_id, sort_order);
+  `);
+
   // Bump cache when analysis payload semantics change
   const userVersion = Number(
     database.pragma("user_version", { simple: true }) ?? 0
   );
-  if (userVersion < 9) {
+  if (userVersion < 10) {
     database.exec(`DELETE FROM analysis_cache`);
-    database.pragma("user_version = 9");
+    database.pragma("user_version = 10");
   }
 }
 

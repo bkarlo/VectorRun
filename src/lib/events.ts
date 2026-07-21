@@ -7,6 +7,8 @@ import { defaultSyncStrategy } from "./sync";
 import type {
   AnalysisPayload,
   ControlRow,
+  DayPhaseKind,
+  DayPhaseRow,
   EventRow,
   ExerciseType,
   GeorefPair,
@@ -243,6 +245,122 @@ export function replaceControls(
     }
   });
   tx();
+  ensureDayPlan(eventId);
+  invalidateAnalysis(eventId);
+}
+
+export function listDayPhases(eventId: string): DayPhaseRow[] {
+  ensureDayPlan(eventId);
+  const phases = getDb()
+    .prepare(
+      `SELECT * FROM day_phases WHERE event_id = ? ORDER BY sort_order ASC`
+    )
+    .all(eventId) as {
+    id: string;
+    event_id: string;
+    kind: DayPhaseKind;
+    name: string;
+    sort_order: number;
+  }[];
+
+  const codesStmt = getDb().prepare(
+    `SELECT control_code FROM phase_controls WHERE phase_id = ? ORDER BY sequence ASC`
+  );
+
+  return phases.map((p) => ({
+    id: p.id,
+    event_id: p.event_id,
+    kind: p.kind,
+    name: p.name,
+    sort_order: p.sort_order,
+    controlCodes:
+      p.kind === "course"
+        ? (codesStmt.all(p.id) as { control_code: string }[]).map(
+            (r) => r.control_code
+          )
+        : [],
+  }));
+}
+
+/**
+ * If no day plan exists, create a single Course phase from current controls
+ * (ordered by sequence). Safe to call repeatedly.
+ */
+export function ensureDayPlan(eventId: string) {
+  const db = getDb();
+  const count = (
+    db
+      .prepare(`SELECT COUNT(*) AS n FROM day_phases WHERE event_id = ?`)
+      .get(eventId) as { n: number }
+  ).n;
+  if (count > 0) return;
+
+  const controls = listControls(eventId);
+  const geoCodes = controls
+    .filter((c) => c.lat != null && c.lon != null)
+    .sort((a, b) => a.sequence - b.sequence)
+    .map((c) => c.code);
+  if (geoCodes.length < 2) return;
+
+  const phaseId = uuid();
+  const tx = db.transaction(() => {
+    db.prepare(
+      `INSERT INTO day_phases (id, event_id, kind, name, sort_order)
+       VALUES (?, ?, 'course', 'Course', 0)`
+    ).run(phaseId, eventId);
+    const ins = db.prepare(
+      `INSERT INTO phase_controls (phase_id, sequence, control_code)
+       VALUES (?, ?, ?)`
+    );
+    geoCodes.forEach((code, i) => ins.run(phaseId, i, code));
+  });
+  tx();
+}
+
+export function replaceDayPlan(
+  eventId: string,
+  phases: {
+    kind: DayPhaseKind;
+    name: string;
+    controlCodes?: string[];
+  }[]
+) {
+  const db = getDb();
+  const tx = db.transaction(() => {
+    const existing = db
+      .prepare(`SELECT id FROM day_phases WHERE event_id = ?`)
+      .all(eventId) as { id: string }[];
+    for (const row of existing) {
+      db.prepare(`DELETE FROM phase_controls WHERE phase_id = ?`).run(row.id);
+    }
+    db.prepare(`DELETE FROM day_phases WHERE event_id = ?`).run(eventId);
+
+    const insPhase = db.prepare(
+      `INSERT INTO day_phases (id, event_id, kind, name, sort_order)
+       VALUES (?, ?, ?, ?, ?)`
+    );
+    const insCtrl = db.prepare(
+      `INSERT INTO phase_controls (phase_id, sequence, control_code)
+       VALUES (?, ?, ?)`
+    );
+
+    phases.forEach((p, i) => {
+      const id = uuid();
+      const name =
+        p.name.trim() ||
+        (p.kind === "course"
+          ? `Course ${i + 1}`
+          : p.kind === "rest"
+            ? "Rest"
+            : "Transit");
+      insPhase.run(id, eventId, p.kind, name, i);
+      if (p.kind === "course") {
+        const codes = p.controlCodes ?? [];
+        codes.forEach((code, j) => insCtrl.run(id, j, code));
+      }
+    });
+  });
+  tx();
   invalidateAnalysis(eventId);
 }
 
@@ -438,7 +556,7 @@ export function getOrComputeAnalysis(eventId: string): AnalysisPayload {
     if (
       payload.syncDeltasMs === undefined ||
       payload.referenceId === undefined ||
-      payload.overall === undefined
+      payload.coursePhases === undefined
     ) {
       invalidateAnalysis(eventId);
     } else {
@@ -457,7 +575,8 @@ export function getOrComputeAnalysis(eventId: string): AnalysisPayload {
     });
   }
 
-  const payload = analyzeEvent(referenceId, controls, runners);
+  const dayPhases = listDayPhases(eventId);
+  const payload = analyzeEvent(referenceId, controls, runners, dayPhases);
   getDb()
     .prepare(
       `INSERT INTO analysis_cache (event_id, payload_json, updated_at)
@@ -471,17 +590,17 @@ export function getOrComputeAnalysis(eventId: string): AnalysisPayload {
 export function getEventBundle(eventId: string) {
   const map = getMap(eventId);
   const controls = listControls(eventId);
+  const dayPhases = listDayPhases(eventId);
   const participants = listParticipants(eventId);
   const tracks = participants.map((p) => {
     const track = getTrackForParticipant(p.id);
     const points = track ? loadTrackPoints(track) : [];
     return { participant: p, track, points };
   });
-  // May auto-migrate sync_mode when no controls
   const analysis = getOrComputeAnalysis(eventId);
   const event = getEvent(eventId);
   if (!event) return null;
-  return { event, map, controls, tracks, analysis };
+  return { event, map, controls, dayPhases, tracks, analysis };
 }
 
 function downsamplePoints(points: TrackPoint[], max = 600): TrackPoint[] {

@@ -5,6 +5,7 @@ import Link from "next/link";
 import type {
   AnalysisPayload,
   ControlRow,
+  DayPhaseRow,
   EventRow,
   MapRow,
   ParticipantRow,
@@ -17,7 +18,7 @@ import { fitAffine, imageOverlayBounds } from "@/lib/georef";
 import { DEFAULT_MAP_BOUNDS } from "@/lib/geoDefaults";
 import {
   applyOffset,
-  computeRaceWindow,
+  computeDayRaceWindow,
   computeReferenceSync,
   courseSegmentIndices,
   courseSegmentPoints,
@@ -56,6 +57,7 @@ interface Props {
   event: EventRow;
   map: MapRow | null;
   controls: ControlRow[];
+  dayPhases: DayPhaseRow[];
   tracks: SessionTrack[];
   analysis: AnalysisPayload;
 }
@@ -64,6 +66,7 @@ export default function SessionWorkspace({
   event,
   map,
   controls,
+  dayPhases,
   tracks: initialTracks,
   analysis,
 }: Props) {
@@ -72,6 +75,7 @@ export default function SessionWorkspace({
     for (const t of initialTracks) s[t.participant.id] = true;
     return s;
   });
+  const [coursePhaseIndex, setCoursePhaseIndex] = useState(0);
   const [analysisIndex, setAnalysisIndex] = useState(-1); // -1 = Overall S→F
   const [playing, setPlaying] = useState(false);
   const [replayMs, setReplayMs] = useState(0);
@@ -159,22 +163,27 @@ export default function SessionWorkspace({
     const tracks = syncedTracks
       .filter((t) => selected[t.participant.id] && t.syncedPoints.length > 0)
       .map((t) => ({ points: t.syncedPoints }));
-    return computeRaceWindow(tracks, controls);
-  }, [syncedTracks, selected, controls, event.race_window_enabled]);
+    return computeDayRaceWindow(tracks, controls, dayPhases);
+  }, [syncedTracks, selected, controls, dayPhases, event.race_window_enabled]);
 
   /** Map / fullscreen timeline: race window when enabled + punches, else full GPX. */
   const mapTimeRange = raceTimeRange ?? fullTimeRange;
 
-  const hasOverall = analysis.overall != null;
+  const coursePhases = analysis.coursePhases ?? [];
+  const activeCourse =
+    coursePhases[
+      Math.min(Math.max(0, coursePhaseIndex), Math.max(0, coursePhases.length - 1))
+    ] ?? null;
+
+  const hasOverall = activeCourse?.overall != null;
+  const activeLegs = activeCourse?.legs ?? [];
   const minAnalysisIndex = hasOverall ? -1 : 0;
   const maxAnalysisIndex =
-    analysis.legs.length > 0
-      ? analysis.legs.length - 1
-      : minAnalysisIndex;
+    activeLegs.length > 0 ? activeLegs.length - 1 : minAnalysisIndex;
   const viewingOverall = analysisIndex < 0 && hasOverall;
   const currentView = viewingOverall
-    ? analysis.overall!
-    : analysis.legs[Math.max(0, analysisIndex)] ?? null;
+    ? activeCourse!.overall!
+    : activeLegs[Math.max(0, analysisIndex)] ?? null;
 
   const currentLegCtrl = useMemo(() => {
     if (!currentView) return null;
@@ -197,11 +206,15 @@ export default function SessionWorkspace({
   }, [currentView, controls]);
 
   const courseCtrlPoints = useMemo(() => {
-    return [...controls]
-      .filter((c) => c.lat != null && c.lon != null)
-      .sort((a, b) => a.sequence - b.sequence)
-      .map((c) => ({ lat: c.lat!, lon: c.lon! }));
-  }, [controls]);
+    if (!activeCourse?.controlCodes.length) return [];
+    const byCode = new Map(controls.map((c) => [c.code, c]));
+    const pts: { lat: number; lon: number }[] = [];
+    for (const code of activeCourse.controlCodes) {
+      const c = byCode.get(code);
+      if (c?.lat != null && c.lon != null) pts.push({ lat: c.lat, lon: c.lon });
+    }
+    return pts;
+  }, [activeCourse, controls]);
 
   /** Zoomed window for current analysis view (overall or leg). */
   const viewTimeRange = useMemo(() => {
@@ -331,35 +344,34 @@ export default function SessionWorkspace({
   const duration = playbackRange.max - playbackRange.min;
   const relMs = Math.max(0, replayMs - playbackRange.min);
 
-  // Follow mode: advance leg when the followed runner punches the next control
+  // Follow mode: advance leg within the active course phase
   useEffect(() => {
-    if (!followRunnerId || analysis.legs.length === 0) return;
+    if (!followRunnerId || activeLegs.length === 0 || !courseCtrlPoints.length)
+      return;
     const track = syncedTracks.find(
       (t) => t.participant.id === followRunnerId
     );
     if (!track?.syncedPoints.length) return;
 
-    const geo = [...controls]
-      .filter((c) => c.lat != null && c.lon != null)
-      .sort((a, b) => a.sequence - b.sequence);
-    if (geo.length < 2) return;
-
     const punchTimeBySeq = new Map<number, number>();
     let fromIdx = 0;
-    for (const c of geo) {
-      const idx = findPunchIndex(
-        track.syncedPoints,
-        { lat: c.lat!, lon: c.lon! },
-        fromIdx
-      );
+    for (const pt of courseCtrlPoints) {
+      const idx = findPunchIndex(track.syncedPoints, pt, fromIdx);
       if (idx < 0) continue;
-      punchTimeBySeq.set(c.sequence, track.syncedPoints[idx].time);
+      const ctrl = controls.find(
+        (c) =>
+          c.lat != null &&
+          c.lon != null &&
+          Math.abs(c.lat - pt.lat) < 1e-9 &&
+          Math.abs(c.lon - pt.lon) < 1e-9
+      );
+      if (ctrl) punchTimeBySeq.set(ctrl.sequence, track.syncedPoints[idx].time);
       fromIdx = idx + 1;
     }
 
     let active = 0;
-    for (let i = 0; i < analysis.legs.length; i++) {
-      const leg = analysis.legs[i];
+    for (let i = 0; i < activeLegs.length; i++) {
+      const leg = activeLegs[i];
       const tFrom = punchTimeBySeq.get(leg.fromSeq);
       const tTo = punchTimeBySeq.get(leg.toSeq);
       if (tFrom == null) continue;
@@ -371,17 +383,22 @@ export default function SessionWorkspace({
         active = i;
         break;
       }
-      active = Math.min(i + 1, analysis.legs.length - 1);
+      active = Math.min(i + 1, activeLegs.length - 1);
     }
 
     setAnalysisIndex((prev) => (prev === active ? prev : active));
   }, [
     followRunnerId,
     replayMs,
-    analysis.legs,
+    activeLegs,
+    courseCtrlPoints,
     syncedTracks,
     controls,
   ]);
+
+  useEffect(() => {
+    setAnalysisIndex(-1);
+  }, [coursePhaseIndex]);
 
   const legTracks = useMemo(() => {
     return syncedTracks
@@ -841,6 +858,32 @@ export default function SessionWorkspace({
                     </>
                   )}
 
+                  {t.points.length > 0 && (
+                    <a
+                      href={`/api/gpx/${t.participant.id}`}
+                      download
+                      className="shrink-0 text-forest-500 hover:text-forest-800 p-0.5 opacity-70 group-hover:opacity-100"
+                      title="Download GPX"
+                      aria-label={`Download GPX for ${t.participant.name}`}
+                    >
+                      <svg
+                        width="14"
+                        height="14"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        aria-hidden
+                      >
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                        <polyline points="7 10 12 15 17 10" />
+                        <line x1="12" y1="15" x2="12" y2="3" />
+                      </svg>
+                    </a>
+                  )}
+
                   <form action={actionDeleteParticipant} className="shrink-0">
                     <input type="hidden" name="event_id" value={event.id} />
                     <input
@@ -973,7 +1016,7 @@ export default function SessionWorkspace({
               {raceTimeRange && !splitsPlayback && (
                 <span
                   className="text-[10px] uppercase tracking-wide text-forest-500"
-                  title="Timeline is first control → last control (warm-up/cool-down excluded)"
+                  title="Timeline is first course start → last course finish"
                 >
                   Race
                 </span>
@@ -1031,7 +1074,8 @@ export default function SessionWorkspace({
           } lg:flex lg:flex-col lg:overflow-auto`}
         >
           {/* Mobile: leg corridor map + zoomed replay */}
-          {mobileTab === "splits" && analysis.legs.length > 0 && (
+          {mobileTab === "splits" &&
+            (activeLegs.length > 0 || hasOverall) && (
             <div className="lg:hidden shrink-0 flex flex-col border-b border-forest-200 bg-forest-50">
               <div className="relative h-[34dvh] min-h-[180px] max-h-[300px]">
                 <SessionMap
@@ -1120,14 +1164,37 @@ export default function SessionWorkspace({
             <h2 className="text-xs font-semibold uppercase tracking-wider text-forest-600">
               Analysis
             </h2>
-            {analysis.legs.length === 0 && !hasOverall ? (
+            {activeLegs.length === 0 && !hasOverall ? (
               <p className="text-sm text-forest-600">
                 {initialTracks.some((t) => t.points.length > 0)
-                  ? "Tracks are ready. Add controls with GPS to see results. Replay works without controls."
+                  ? "Tracks are ready. Add controls and define the day (Setup) to see results."
                   : "Upload GPX tracks to overlay routes. Map image is optional."}
               </p>
             ) : (
               <>
+                {coursePhases.length > 0 && (
+                  <select
+                    className="w-full rounded-lg border border-forest-200 px-2 py-2 text-sm"
+                    value={Math.min(
+                      coursePhaseIndex,
+                      Math.max(0, coursePhases.length - 1)
+                    )}
+                    onChange={(e) =>
+                      setCoursePhaseIndex(Number(e.target.value))
+                    }
+                    aria-label="Select course phase"
+                  >
+                    {coursePhases.map((ph, i) => (
+                      <option key={ph.id} value={i}>
+                        {ph.name}
+                        {ph.controlCodes.length
+                          ? ` · ${ph.controlCodes.join("→")}`
+                          : ""}
+                      </option>
+                    ))}
+                  </select>
+                )}
+
                 <div className="flex items-center gap-1.5">
                   <button
                     type="button"
@@ -1146,13 +1213,13 @@ export default function SessionWorkspace({
                     onChange={(e) => setAnalysisIndex(Number(e.target.value))}
                     aria-label="Select overall or leg"
                   >
-                    {hasOverall && analysis.overall && (
+                    {hasOverall && activeCourse?.overall && (
                       <option value={-1}>
-                        Overall · {analysis.overall.fromCode} →{" "}
-                        {analysis.overall.toCode}
+                        Overall · {activeCourse.overall.fromCode} →{" "}
+                        {activeCourse.overall.toCode}
                       </option>
                     )}
-                    {analysis.legs.map((leg, i) => (
+                    {activeLegs.map((leg, i) => (
                       <option key={i} value={i}>
                         {leg.fromCode} → {leg.toCode}
                       </option>

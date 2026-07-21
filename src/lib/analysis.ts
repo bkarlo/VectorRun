@@ -3,16 +3,16 @@ import { mpsToPaceMinPerKm } from "./speed";
 import {
   applyOffset,
   computeReferenceSync,
-  courseSegmentIndices,
   findPunchIndex,
-  legSegmentIndices,
 } from "./sync";
 import { detectHesitations } from "./hesitation";
 import { applyDecisionQuality } from "./decisionQuality";
 import type {
+  AnalysisCoursePhase,
   AnalysisLeg,
   AnalysisPayload,
   ControlRow,
+  DayPhaseRow,
   LegSplit,
   ParticipantRow,
   SyncStrategy,
@@ -26,10 +26,25 @@ export interface RunnerTrack {
   points: TrackPoint[];
 }
 
-function buildLeg(
+function resolveOrderedControls(
+  codes: string[],
+  byCode: Map<string, ControlRow>
+): ControlRow[] | null {
+  const out: ControlRow[] = [];
+  for (const code of codes) {
+    const c = byCode.get(code);
+    if (!c || c.lat == null || c.lon == null) return null;
+    out.push(c);
+  }
+  return out.length >= 2 ? out : null;
+}
+
+function buildLegFromOrdered(
   synced: { runner: RunnerTrack; points: TrackPoint[] }[],
   from: ControlRow,
-  to: ControlRow
+  to: ControlRow,
+  /** Per-runner search cursor; advanced to after `to` punch when successful. */
+  cursors: Record<string, number>
 ): AnalysisLeg {
   const fromCtrl = { lat: from.lat!, lon: from.lon! };
   const toCtrl = { lat: to.lat!, lon: to.lon! };
@@ -37,8 +52,10 @@ function buildLeg(
   const segments: Record<string, TrackPoint[]> = {};
 
   for (const { runner, points } of synced) {
-    const idx = legSegmentIndices(points, fromCtrl, toCtrl);
-    let punchedFrom = false;
+    const id = runner.participant.id;
+    const searchFrom = cursors[id] ?? 0;
+    const fromIdx = findPunchIndex(points, fromCtrl, searchFrom);
+    let punchedFrom = fromIdx >= 0;
     let punchedTo = false;
     let timeMs: number | null = null;
     let distanceM: number | null = null;
@@ -47,26 +64,23 @@ function buildLeg(
       | ReturnType<typeof detectHesitations>
       | undefined;
 
-    if (idx) {
-      punchedFrom = true;
-      punchedTo = true;
-      const segment = points.slice(idx.fromIdx, idx.toIdx + 1);
-      segments[runner.participant.id] = segment;
-      timeMs = points[idx.toIdx].time - points[idx.fromIdx].time;
-      distanceM = pathDistanceM(segment);
-      climbM = pathClimbM(segment);
-      const h = detectHesitations(segment);
-      if (h.length) hesitations = h;
-    } else {
-      const fromIdx = findPunchIndex(points, fromCtrl);
-      punchedFrom = fromIdx >= 0;
-      if (punchedFrom) {
-        punchedTo = findPunchIndex(points, toCtrl, fromIdx + 1) >= 0;
+    if (fromIdx >= 0) {
+      const toIdx = findPunchIndex(points, toCtrl, fromIdx + 1);
+      punchedTo = toIdx >= 0;
+      if (toIdx > fromIdx) {
+        const segment = points.slice(fromIdx, toIdx + 1);
+        segments[id] = segment;
+        timeMs = points[toIdx].time - points[fromIdx].time;
+        distanceM = pathDistanceM(segment);
+        climbM = pathClimbM(segment);
+        const h = detectHesitations(segment);
+        if (h.length) hesitations = h;
+        cursors[id] = toIdx + 1;
       }
     }
 
     splits.push({
-      participantId: runner.participant.id,
+      participantId: id,
       participantName: runner.participant.name,
       color: runner.participant.color,
       fromSeq: from.sequence,
@@ -100,20 +114,36 @@ function buildLeg(
   };
 }
 
-/** Full course following every control in order (not a direct S→F shortcut). */
-function buildOverall(
+function buildOverallFromOrdered(
   synced: { runner: RunnerTrack; points: TrackPoint[] }[],
-  sorted: ControlRow[]
+  ordered: ControlRow[],
+  /** Cursor at start of this course phase; advanced past finish on success. */
+  cursors: Record<string, number>
 ): AnalysisLeg {
-  const first = sorted[0];
-  const last = sorted[sorted.length - 1];
-  const course = sorted.map((c) => ({ lat: c.lat!, lon: c.lon! }));
-  const toCtrl = course[course.length - 1];
+  const first = ordered[0];
+  const last = ordered[ordered.length - 1];
+  const coursePts = ordered.map((c) => ({ lat: c.lat!, lon: c.lon! }));
+  const toCtrl = coursePts[coursePts.length - 1];
   const splits: LegSplit[] = [];
   const segments: Record<string, TrackPoint[]> = {};
 
   for (const { runner, points } of synced) {
-    const idx = courseSegmentIndices(points, course);
+    const id = runner.participant.id;
+    const searchFrom = cursors[id] ?? 0;
+    // Walk controls from cursor without mutating global until complete
+    let from = searchFrom;
+    const punchIndices: number[] = [];
+    let ok = true;
+    for (const pt of coursePts) {
+      const idx = findPunchIndex(points, pt, from);
+      if (idx < 0) {
+        ok = false;
+        break;
+      }
+      punchIndices.push(idx);
+      from = idx + 1;
+    }
+
     let punchedFrom = false;
     let punchedTo = false;
     let timeMs: number | null = null;
@@ -123,28 +153,27 @@ function buildOverall(
       | ReturnType<typeof detectHesitations>
       | undefined;
 
-    if (idx) {
+    if (ok && punchIndices.length >= 2) {
+      const fromIdx = punchIndices[0];
+      const toIdx = punchIndices[punchIndices.length - 1];
       punchedFrom = true;
       punchedTo = true;
-      const segment = points.slice(idx.fromIdx, idx.toIdx + 1);
-      segments[runner.participant.id] = segment;
-      timeMs = points[idx.toIdx].time - points[idx.fromIdx].time;
+      const segment = points.slice(fromIdx, toIdx + 1);
+      segments[id] = segment;
+      timeMs = points[toIdx].time - points[fromIdx].time;
       distanceM = pathDistanceM(segment);
       climbM = pathClimbM(segment);
       const h = detectHesitations(segment);
       if (h.length) hesitations = h;
+      cursors[id] = toIdx + 1;
     } else {
-      const fromIdx = findPunchIndex(points, course[0]);
+      const fromIdx = findPunchIndex(points, coursePts[0], searchFrom);
       punchedFrom = fromIdx >= 0;
-      if (punchedFrom) {
-        // Still require ordered finish after visiting intermediates when possible
-        const full = courseSegmentIndices(points, course);
-        punchedTo = full != null;
-      }
+      punchedTo = false;
     }
 
     splits.push({
-      participantId: runner.participant.id,
+      participantId: id,
       participantName: runner.participant.name,
       color: runner.participant.color,
       fromSeq: first.sequence,
@@ -178,14 +207,27 @@ function buildOverall(
   };
 }
 
+/**
+ * Analyze event using the day plan. Course phases are matched time-forward
+ * so the same control order can appear twice as separate attempts.
+ */
 export function analyzeEvent(
   referenceId: string | null,
   controls: ControlRow[],
-  runners: RunnerTrack[]
+  runners: RunnerTrack[],
+  dayPhases: DayPhaseRow[]
 ): AnalysisPayload {
-  const sorted = [...controls]
+  const byCode = new Map(controls.map((c) => [c.code, c]));
+  const geoForSync = [...controls]
     .filter((c) => c.lat != null && c.lon != null)
     .sort((a, b) => a.sequence - b.sequence);
+
+  // Prefer first course phase order for sync punch strategies
+  const firstCourse = dayPhases.find((p) => p.kind === "course");
+  const syncControls =
+    firstCourse && firstCourse.controlCodes.length >= 1
+      ? (resolveOrderedControls(firstCourse.controlCodes, byCode) ?? geoForSync)
+      : geoForSync;
 
   const sync = computeReferenceSync(
     referenceId,
@@ -195,7 +237,7 @@ export function analyzeEvent(
       strategy: (r.participant.sync_strategy || "motion_start") as SyncStrategy,
       manualDeltaMs: r.track.start_offset_ms,
     })),
-    sorted
+    syncControls
   );
 
   const synced: { runner: RunnerTrack; points: TrackPoint[] }[] = [];
@@ -207,16 +249,57 @@ export function analyzeEvent(
     });
   }
 
-  const legs: AnalysisLeg[] = [];
-  for (let i = 0; i < sorted.length - 1; i++) {
-    legs.push(buildLeg(synced, sorted[i], sorted[i + 1]));
+  const cursors: Record<string, number> = {};
+  for (const s of synced) cursors[s.runner.participant.id] = 0;
+
+  const coursePhases: AnalysisCoursePhase[] = [];
+
+  for (const phase of dayPhases) {
+    if (phase.kind !== "course") continue;
+    const ordered = resolveOrderedControls(phase.controlCodes, byCode);
+    if (!ordered) {
+      coursePhases.push({
+        id: phase.id,
+        name: phase.name,
+        sortOrder: phase.sort_order,
+        controlCodes: phase.controlCodes,
+        overall: null,
+        legs: [],
+      });
+      continue;
+    }
+
+    // Snapshot cursors before legs so overall uses same phase window start;
+    // then advance via overall (full course walk). Legs use independent
+    // per-leg punches within the phase by temporarily walking from phase start.
+    const phaseStart: Record<string, number> = { ...cursors };
+
+    const legs: AnalysisLeg[] = [];
+    const legCursors = { ...phaseStart };
+    for (let i = 0; i < ordered.length - 1; i++) {
+      legs.push(
+        buildLegFromOrdered(synced, ordered[i], ordered[i + 1], legCursors)
+      );
+    }
+
+    const overall = buildOverallFromOrdered(synced, ordered, cursors);
+
+    coursePhases.push({
+      id: phase.id,
+      name: phase.name,
+      sortOrder: phase.sort_order,
+      controlCodes: phase.controlCodes,
+      overall,
+      legs,
+    });
   }
 
-  const overall = sorted.length >= 2 ? buildOverall(synced, sorted) : null;
-
+  // Compat: first course phase
+  const first = coursePhases[0];
   return {
-    overall,
-    legs,
+    coursePhases,
+    overall: first?.overall ?? null,
+    legs: first?.legs ?? [],
     syncOffsets: sync.offsets,
     syncDeltasMs: sync.deltasMs,
     referenceId: sync.referenceId,
@@ -273,21 +356,18 @@ export function parseSignedDurationToSec(text: string): number | null {
   const raw = text.trim().replace(/−/g, "-").replace(/\s+/g, " ");
   if (!raw) return null;
 
-  // Plain seconds: -241, +12, 12s
   const plain = raw.match(/^([+-]?)(\d+)\s*s?$/i);
   if (plain) {
     const n = parseInt(plain[2], 10);
     return plain[1] === "-" ? -n : n;
   }
 
-  // m:ss or -m:ss
   const colon = raw.match(/^([+-]?)(\d+):(\d{1,2})$/);
   if (colon) {
     const n = parseInt(colon[2], 10) * 60 + parseInt(colon[3], 10);
     return colon[1] === "-" ? -n : n;
   }
 
-  // -4m 1s / +4m1s / 4m
   const ms = raw.match(/^([+-]?)(\d+)\s*m(?:\s*(\d+)\s*s?)?$/i);
   if (ms) {
     const n = parseInt(ms[2], 10) * 60 + (ms[3] ? parseInt(ms[3], 10) : 0);

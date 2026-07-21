@@ -4,7 +4,8 @@ export type ExerciseType =
   | "compass"
   | "corridor"
   | "one_man_relay"
-  | "memory_o";
+  | "memory_o"
+  | "multi_course";
 
 export type SyncStrategy =
   | "motion_start"
@@ -200,8 +201,35 @@ export interface AnalysisLeg {
   splits: LegSplit[];
 }
 
+export type DayPhaseKind = "transit" | "rest" | "course";
+
+export interface DayPhaseRow {
+  id: string;
+  event_id: string;
+  kind: DayPhaseKind;
+  name: string;
+  sort_order: number;
+  /** Ordered control codes for course phases; empty otherwise. */
+  controlCodes: string[];
+}
+
+export interface AnalysisCoursePhase {
+  id: string;
+  name: string;
+  sortOrder: number;
+  /** Ordered codes for this attempt */
+  controlCodes: string[];
+  overall: AnalysisLeg | null;
+  legs: AnalysisLeg[];
+}
+
 export interface AnalysisPayload {
-  /** Full course S→F (first geo control → last). */
+  /** Orienteering attempts in day order (repeats allowed). */
+  coursePhases: AnalysisCoursePhase[];
+  /**
+   * Compat: first course phase overall/legs (or null/[] if none).
+   * Prefer coursePhases in new UI.
+   */
   overall: AnalysisLeg | null;
   legs: AnalysisLeg[];
   syncOffsets: Record<string, number>;
@@ -230,4 +258,5 @@ export const EXERCISE_LABELS: Record<ExerciseType, string> = {
   corridor: "Corridor",
   one_man_relay: "One-man relay",
   memory_o: "Memory-O",
+  multi_course: "Multi-course",
 };
