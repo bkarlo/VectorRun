@@ -7,17 +7,28 @@ import {
   createEvent,
   deleteEvent,
   deleteParticipant,
+  getTrackForParticipant,
+  listControls,
+  listParticipants,
+  loadTrackPoints,
   renameParticipant,
   replaceControls,
   replaceDayPlan,
   saveGeoref,
   saveMapOpacity,
+  saveTrack,
   setManualDelta,
   setParticipantSyncStrategy,
   setRaceWindowEnabled,
   setReferenceParticipant,
   updateEvent,
 } from "@/lib/events";
+import { parseGpx } from "@/lib/gpx";
+import {
+  fillPrefixFromLegs,
+  mergeTrackPoints,
+  prependPrefix,
+} from "@/lib/trackRepair";
 import type {
   ControlRow,
   DayPhaseKind,
@@ -77,6 +88,7 @@ export async function actionSaveDayPlan(
     kind: DayPhaseKind;
     name: string;
     controlCodes?: string[];
+    courseDef?: import("@/lib/courseDef").CourseDef | null;
   }[]
 ) {
   replaceDayPlan(eventId, phases);
@@ -138,4 +150,138 @@ export async function actionSetRunnerDelta(formData: FormData) {
   const deltaSec = Number(formData.get("delta_sec") || 0);
   setManualDelta(participantId, Math.round(deltaSec * 1000));
   revalidatePath(`/events/${eventId}`);
+}
+
+function assertParticipantInEvent(
+  eventId: string,
+  participantId: string
+): void {
+  const parts = listParticipants(eventId);
+  if (!parts.some((p) => p.id === participantId)) {
+    throw new Error("Participant not found in event");
+  }
+}
+
+export async function actionMergeRunnerTracks(
+  eventId: string,
+  targetId: string,
+  sourceId: string
+): Promise<{ ok: true; pointCount: number } | { ok: false; error: string }> {
+  try {
+    if (targetId === sourceId) {
+      return { ok: false, error: "Cannot merge a runner with itself" };
+    }
+    assertParticipantInEvent(eventId, targetId);
+    assertParticipantInEvent(eventId, sourceId);
+
+    const targetTrack = getTrackForParticipant(targetId);
+    const sourceTrack = getTrackForParticipant(sourceId);
+    if (!targetTrack) {
+      return { ok: false, error: "Target runner has no track" };
+    }
+    if (!sourceTrack) {
+      return { ok: false, error: "Source runner has no track" };
+    }
+
+    const a = loadTrackPoints(targetTrack);
+    const b = loadTrackPoints(sourceTrack);
+    if (a.length === 0 || b.length === 0) {
+      return { ok: false, error: "Both runners need track points" };
+    }
+
+    const { points, stats } = mergeTrackPoints(a, b);
+    const filename = `${targetTrack.source_filename}+${sourceTrack.source_filename}`;
+    saveTrack(targetId, filename.slice(0, 200), points);
+    deleteParticipant(sourceId);
+    revalidatePath(`/events/${eventId}`);
+    return { ok: true, pointCount: stats.pointCountMerged };
+  } catch (e) {
+    return {
+      ok: false,
+      error: e instanceof Error ? e.message : "Merge failed",
+    };
+  }
+}
+
+export async function actionAppendGpxToRunner(
+  eventId: string,
+  participantId: string,
+  gpxText: string,
+  filename: string
+): Promise<{ ok: true; pointCount: number } | { ok: false; error: string }> {
+  try {
+    assertParticipantInEvent(eventId, participantId);
+    const track = getTrackForParticipant(participantId);
+    if (!track) {
+      return { ok: false, error: "Runner has no track to append onto" };
+    }
+
+    const incoming = parseGpx(gpxText);
+    if (incoming.length === 0) {
+      return { ok: false, error: "No track points found in GPX" };
+    }
+
+    const existing = loadTrackPoints(track);
+    const { points, stats } = mergeTrackPoints(existing, incoming);
+    const mergedName = `${track.source_filename}+${filename || "append.gpx"}`;
+    saveTrack(participantId, mergedName.slice(0, 200), points);
+    revalidatePath(`/events/${eventId}`);
+    return { ok: true, pointCount: stats.pointCountMerged };
+  } catch (e) {
+    return {
+      ok: false,
+      error: e instanceof Error ? e.message : "Append failed",
+    };
+  }
+}
+
+export async function actionFillTrackPrefix(
+  eventId: string,
+  participantId: string,
+  controlIds: string[],
+  speedsMps: number[]
+): Promise<{ ok: true; pointCount: number } | { ok: false; error: string }> {
+  try {
+    assertParticipantInEvent(eventId, participantId);
+    if (controlIds.length === 0) {
+      return { ok: false, error: "Select at least one control waypoint" };
+    }
+    if (speedsMps.length !== controlIds.length) {
+      return { ok: false, error: "Each waypoint needs a speed" };
+    }
+
+    const track = getTrackForParticipant(participantId);
+    if (!track) {
+      return { ok: false, error: "Runner has no track" };
+    }
+    const existing = loadTrackPoints(track);
+    if (existing.length === 0) {
+      return { ok: false, error: "Track has no GPS points to attach to" };
+    }
+
+    const controls = listControls(eventId);
+    const byId = new Map(controls.map((c) => [c.id, c]));
+    const waypoints: { lat: number; lon: number }[] = [];
+    for (const id of controlIds) {
+      const c = byId.get(id);
+      if (!c || c.lat == null || c.lon == null) {
+        return {
+          ok: false,
+          error: `Control ${c?.code ?? id} is missing map coordinates`,
+        };
+      }
+      waypoints.push({ lat: c.lat, lon: c.lon });
+    }
+
+    const prefix = fillPrefixFromLegs(waypoints, speedsMps, existing[0]);
+    const points = prependPrefix(prefix, existing);
+    saveTrack(participantId, track.source_filename, points);
+    revalidatePath(`/events/${eventId}`);
+    return { ok: true, pointCount: points.length };
+  } catch (e) {
+    return {
+      ok: false,
+      error: e instanceof Error ? e.message : "Fill failed",
+    };
+  }
 }

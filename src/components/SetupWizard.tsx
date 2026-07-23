@@ -5,6 +5,13 @@ import dynamic from "next/dynamic";
 import Link from "next/link";
 import type { DayPhaseKind, GeorefPair, TrackPoint } from "@/lib/types";
 import {
+  collectAllCodes,
+  courseDefFromCodes,
+  type CourseDef,
+  validateCourseDef,
+} from "@/lib/courseDef";
+import CourseChainEditor from "./CourseChainEditor";
+import {
   actionSaveGeoref,
   actionSaveControls,
   actionSaveDayPlan,
@@ -49,6 +56,7 @@ interface Props {
     kind: DayPhaseKind;
     name: string;
     controlCodes: string[];
+    courseDef?: CourseDef | null;
   }[];
 }
 
@@ -57,7 +65,22 @@ type Mode = "place" | "points" | "controls" | "day";
 interface DayPhaseDraft {
   kind: DayPhaseKind;
   name: string;
+  courseDef: CourseDef;
+}
+
+function draftFromInitial(p: {
+  kind: DayPhaseKind;
+  name: string;
   controlCodes: string[];
+  courseDef?: CourseDef | null;
+}): DayPhaseDraft {
+  const courseDef =
+    p.kind === "course"
+      ? p.courseDef?.steps.length
+        ? p.courseDef
+        : courseDefFromCodes(p.controlCodes)
+      : { version: 1 as const, steps: [] };
+  return { kind: p.kind, name: p.name, courseDef };
 }
 
 export default function SetupWizard(props: Props) {
@@ -94,11 +117,7 @@ export default function SetupWizard(props: Props) {
   const [raceWindowStatus, setRaceWindowStatus] = useState("");
   const [dayPhases, setDayPhases] = useState<DayPhaseDraft[]>(() =>
     props.initialDayPhases?.length
-      ? props.initialDayPhases.map((p) => ({
-          kind: p.kind,
-          name: p.name,
-          controlCodes: [...p.controlCodes],
-        }))
+      ? props.initialDayPhases.map(draftFromInitial)
       : []
   );
   const [dayStatus, setDayStatus] = useState("");
@@ -236,12 +255,27 @@ export default function SetupWizard(props: Props) {
   };
 
   const saveDay = async () => {
+    const geo = new Set(
+      controls
+        .filter((c) => c.code.trim() && c.lat != null && c.lon != null)
+        .map((c) => c.code)
+    );
+    for (const p of dayPhases) {
+      if (p.kind !== "course") continue;
+      const err = validateCourseDef(p.courseDef, geo);
+      if (err) {
+        setDayStatus(`${p.name}: ${err}`);
+        return;
+      }
+    }
     await actionSaveDayPlan(
       props.eventId,
       dayPhases.map((p) => ({
         kind: p.kind,
         name: p.name,
-        controlCodes: p.kind === "course" ? p.controlCodes : [],
+        courseDef: p.kind === "course" ? p.courseDef : null,
+        controlCodes:
+          p.kind === "course" ? collectAllCodes(p.courseDef) : [],
       }))
     );
     setDayStatus("Day plan saved");
@@ -444,9 +478,9 @@ export default function SetupWizard(props: Props) {
               Define the day
             </h3>
             <p className="text-sm text-forest-600 mt-1">
-              Order the session: walk there, courses (same loop can appear
-              twice), rest at base, walk back. Place controls first, then build
-              this timeline.
+              Order the session as a timeline. Courses show as a compact chain
+              (S → (1A|1B) → 2 → F); use Edit chain to reorder, add controls, or
+              expand forks.
             </p>
           </div>
 
@@ -478,8 +512,12 @@ export default function SetupWizard(props: Props) {
                             ? {
                                 ...p,
                                 kind,
-                                controlCodes:
-                                  kind === "course" ? p.controlCodes : [],
+                                courseDef:
+                                  kind === "course"
+                                    ? p.courseDef.steps.length
+                                      ? p.courseDef
+                                      : courseDefFromCodes([])
+                                    : { version: 1, steps: [] },
                               }
                             : p
                         )
@@ -547,69 +585,18 @@ export default function SetupWizard(props: Props) {
                 </div>
 
                 {phase.kind === "course" && (
-                  <div className="pl-8 space-y-2">
-                    <div className="flex flex-wrap gap-1 items-center">
-                      {phase.controlCodes.length === 0 ? (
-                        <span className="text-xs text-forest-500 italic">
-                          No order yet — add controls below
-                        </span>
-                      ) : (
-                        phase.controlCodes.map((code, ci) => (
-                          <span
-                            key={`${code}-${ci}`}
-                            className="inline-flex items-center gap-1 rounded bg-forest-50 border border-forest-200 px-1.5 py-0.5 text-xs font-mono"
-                          >
-                            {code}
-                            <button
-                              type="button"
-                              className="text-forest-500 hover:text-red-600"
-                              onClick={() =>
-                                setDayPhases((prev) =>
-                                  prev.map((p, j) =>
-                                    j === i
-                                      ? {
-                                          ...p,
-                                          controlCodes: p.controlCodes.filter(
-                                            (_, k) => k !== ci
-                                          ),
-                                        }
-                                      : p
-                                  )
-                                )
-                              }
-                            >
-                              ×
-                            </button>
-                            {ci < phase.controlCodes.length - 1 ? (
-                              <span className="text-forest-400">→</span>
-                            ) : null}
-                          </span>
-                        ))
-                      )}
-                    </div>
-                    <div className="flex flex-wrap gap-1">
-                      {controlCodeOptions.map((code) => (
-                        <button
-                          key={code}
-                          type="button"
-                          className="rounded border border-forest-200 px-2 py-0.5 text-xs font-mono hover:bg-forest-50"
-                          onClick={() =>
-                            setDayPhases((prev) =>
-                              prev.map((p, j) =>
-                                j === i
-                                  ? {
-                                      ...p,
-                                      controlCodes: [...p.controlCodes, code],
-                                    }
-                                  : p
-                              )
-                            )
-                          }
-                        >
-                          + {code}
-                        </button>
-                      ))}
-                    </div>
+                  <div className="pl-8 pt-0.5">
+                    <CourseChainEditor
+                      def={phase.courseDef}
+                      controlCodes={controlCodeOptions}
+                      onChange={(courseDef) =>
+                        setDayPhases((prev) =>
+                          prev.map((p, j) =>
+                            j === i ? { ...p, courseDef } : p
+                          )
+                        )
+                      }
+                    />
                   </div>
                 )}
               </li>
@@ -623,7 +610,11 @@ export default function SetupWizard(props: Props) {
               onClick={() =>
                 setDayPhases((prev) => [
                   ...prev,
-                  { kind: "transit", name: "Walk there", controlCodes: [] },
+                  {
+                    kind: "transit",
+                    name: "Walk there",
+                    courseDef: { version: 1, steps: [] },
+                  },
                 ])
               }
             >
@@ -635,7 +626,11 @@ export default function SetupWizard(props: Props) {
               onClick={() =>
                 setDayPhases((prev) => [
                   ...prev,
-                  { kind: "rest", name: "Rest", controlCodes: [] },
+                  {
+                    kind: "rest",
+                    name: "Rest",
+                    courseDef: { version: 1, steps: [] },
+                  },
                 ])
               }
             >
@@ -650,7 +645,7 @@ export default function SetupWizard(props: Props) {
                   {
                     kind: "course",
                     name: `Course ${prev.filter((p) => p.kind === "course").length + 1}`,
-                    controlCodes: [],
+                    courseDef: courseDefFromCodes([]),
                   },
                 ])
               }

@@ -198,6 +198,11 @@ export interface AnalysisLeg {
   toSeq: number;
   fromCode: string;
   toCode: string;
+  /** Present when this leg is on (or exits) a fork arm. */
+  forkId?: string;
+  forkLabel?: string;
+  armId?: string;
+  armLabel?: string;
   splits: LegSplit[];
 }
 
@@ -209,16 +214,30 @@ export interface DayPhaseRow {
   kind: DayPhaseKind;
   name: string;
   sort_order: number;
-  /** Ordered control codes for course phases; empty otherwise. */
+  /**
+   * Compat / projection: all codes used in the course (spine + fork arms).
+   * Prefer `courseDef` for structure.
+   */
   controlCodes: string[];
+  /** Course AST; null for transit/rest. Linear courses are control-only steps. */
+  courseDef: import("./courseDef").CourseDef | null;
+}
+
+export interface RealizedRunnerPath {
+  codes: string[];
+  /** forkId → chosen armId */
+  forks: Record<string, string>;
+  /** Punch indices into the course-synced slice (aligned with codes). */
+  punchIndices: number[];
 }
 
 export interface AnalysisCoursePhase {
   id: string;
   name: string;
   sortOrder: number;
-  /** Ordered codes for this attempt */
+  /** All codes used (compat). */
   controlCodes: string[];
+  courseDef: import("./courseDef").CourseDef | null;
   overall: AnalysisLeg | null;
   legs: AnalysisLeg[];
   /** Sync for this course only (independent of other courses). */
@@ -228,6 +247,8 @@ export interface AnalysisCoursePhase {
   referenceWallTimeMs: number | null;
   /** Real-time raw-track indices (fromIdx→toIdx) per participant for this course. */
   windows: Record<string, { fromIdx: number; toIdx: number }>;
+  /** Per-runner realized linear path after fork choice. */
+  realizedPath: Record<string, RealizedRunnerPath>;
 }
 
 export interface AnalysisPayload {

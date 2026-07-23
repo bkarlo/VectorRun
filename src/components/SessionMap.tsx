@@ -87,6 +87,8 @@ interface Props {
   raceWindow?: { min: number; max: number } | null;
   resizeToken?: string | number;
   mapOpacity?: number;
+  /** Dashed polyline for planned missing-start fill (control legs → first GPS). */
+  fillPreview?: { lat: number; lon: number }[] | null;
 }
 
 function FitBounds({
@@ -159,6 +161,7 @@ export default function SessionMap({
   raceWindow = null,
   resizeToken,
   mapOpacity = 0.55,
+  fillPreview = null,
 }: Props) {
   const corners = useMemo(() => {
     if (!mapAffine || mapWidth <= 0 || mapHeight <= 0) return null;
@@ -300,6 +303,20 @@ export default function SessionMap({
           />
         );
       })}
+
+      {fillPreview && fillPreview.length >= 2 && (
+        <Polyline
+          positions={fillPreview.map(
+            (p) => [p.lat, p.lon] as [number, number]
+          )}
+          pathOptions={{
+            color: "#0f766e",
+            weight: 3,
+            opacity: 0.85,
+            dashArray: "8 6",
+          }}
+        />
+      )}
 
       {/* Runner avatars at replay time */}
       {tracks.map((t) => {

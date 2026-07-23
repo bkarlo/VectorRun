@@ -113,6 +113,7 @@ export default async function SetupPage({
             kind: p.kind,
             name: p.name,
             controlCodes: p.controlCodes,
+            courseDef: p.courseDef,
           }))}
         />
       </div>

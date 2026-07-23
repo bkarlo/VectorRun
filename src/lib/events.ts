@@ -2,6 +2,12 @@ import fs from "fs";
 import path from "path";
 import { v4 as uuid } from "uuid";
 import { analyzeEvent, type RunnerTrack } from "./analysis";
+import {
+  collectAllCodes,
+  courseDefFromCodes,
+  parseCourseDef,
+  type CourseDef,
+} from "./courseDef";
 import { getDb, getTracksDir, getUploadsDir } from "./db";
 import { defaultSyncStrategy } from "./sync";
 import type {
@@ -261,25 +267,45 @@ export function listDayPhases(eventId: string): DayPhaseRow[] {
     kind: DayPhaseKind;
     name: string;
     sort_order: number;
+    course_json?: string | null;
   }[];
 
   const codesStmt = getDb().prepare(
     `SELECT control_code FROM phase_controls WHERE phase_id = ? ORDER BY sequence ASC`
   );
 
-  return phases.map((p) => ({
-    id: p.id,
-    event_id: p.event_id,
-    kind: p.kind,
-    name: p.name,
-    sort_order: p.sort_order,
-    controlCodes:
+  return phases.map((p) => {
+    const legacyCodes =
       p.kind === "course"
         ? (codesStmt.all(p.id) as { control_code: string }[]).map(
             (r) => r.control_code
           )
-        : [],
-  }));
+        : [];
+
+    let courseDef: CourseDef | null = null;
+    if (p.kind === "course") {
+      if (p.course_json) {
+        try {
+          courseDef = parseCourseDef(JSON.parse(p.course_json));
+        } catch {
+          courseDef = null;
+        }
+      }
+      if (!courseDef && legacyCodes.length > 0) {
+        courseDef = courseDefFromCodes(legacyCodes);
+      }
+    }
+
+    return {
+      id: p.id,
+      event_id: p.event_id,
+      kind: p.kind,
+      name: p.name,
+      sort_order: p.sort_order,
+      controlCodes: courseDef ? collectAllCodes(courseDef) : legacyCodes,
+      courseDef,
+    };
+  });
 }
 
 /**
@@ -303,11 +329,12 @@ export function ensureDayPlan(eventId: string) {
   if (geoCodes.length < 2) return;
 
   const phaseId = uuid();
+  const def = courseDefFromCodes(geoCodes);
   const tx = db.transaction(() => {
     db.prepare(
-      `INSERT INTO day_phases (id, event_id, kind, name, sort_order)
-       VALUES (?, ?, 'course', 'Course', 0)`
-    ).run(phaseId, eventId);
+      `INSERT INTO day_phases (id, event_id, kind, name, sort_order, course_json)
+       VALUES (?, ?, 'course', 'Course', 0, ?)`
+    ).run(phaseId, eventId, JSON.stringify(def));
     const ins = db.prepare(
       `INSERT INTO phase_controls (phase_id, sequence, control_code)
        VALUES (?, ?, ?)`
@@ -323,6 +350,7 @@ export function replaceDayPlan(
     kind: DayPhaseKind;
     name: string;
     controlCodes?: string[];
+    courseDef?: CourseDef | null;
   }[]
 ) {
   const db = getDb();
@@ -336,8 +364,8 @@ export function replaceDayPlan(
     db.prepare(`DELETE FROM day_phases WHERE event_id = ?`).run(eventId);
 
     const insPhase = db.prepare(
-      `INSERT INTO day_phases (id, event_id, kind, name, sort_order)
-       VALUES (?, ?, ?, ?, ?)`
+      `INSERT INTO day_phases (id, event_id, kind, name, sort_order, course_json)
+       VALUES (?, ?, ?, ?, ?, ?)`
     );
     const insCtrl = db.prepare(
       `INSERT INTO phase_controls (phase_id, sequence, control_code)
@@ -353,15 +381,29 @@ export function replaceDayPlan(
           : p.kind === "rest"
             ? "Rest"
             : "Transit");
-      insPhase.run(id, eventId, p.kind, name, i);
+
+      let courseJson: string | null = null;
+      let projection: string[] = [];
       if (p.kind === "course") {
-        const codes = p.controlCodes ?? [];
-        codes.forEach((code, j) => insCtrl.run(id, j, code));
+        const def =
+          p.courseDef ??
+          (p.controlCodes?.length
+            ? courseDefFromCodes(p.controlCodes)
+            : emptyCourseDefSafe(p.controlCodes));
+        courseJson = JSON.stringify(def);
+        projection = collectAllCodes(def);
       }
+
+      insPhase.run(id, eventId, p.kind, name, i, courseJson);
+      projection.forEach((code, j) => insCtrl.run(id, j, code));
     });
   });
   tx();
   invalidateAnalysis(eventId);
+}
+
+function emptyCourseDefSafe(codes?: string[]): CourseDef {
+  return courseDefFromCodes(codes ?? []);
 }
 
 export function listParticipants(eventId: string): ParticipantRow[] {
@@ -559,7 +601,8 @@ export function getOrComputeAnalysis(eventId: string): AnalysisPayload {
       payload.referenceId === undefined ||
       payload.coursePhases === undefined ||
       firstPhase?.syncOffsets === undefined ||
-      firstPhase?.windows === undefined
+      firstPhase?.windows === undefined ||
+      firstPhase?.realizedPath === undefined
     ) {
       invalidateAnalysis(eventId);
     } else {

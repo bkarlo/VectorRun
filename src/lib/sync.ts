@@ -388,6 +388,151 @@ export function matchCourseWindow(
   return { fromIdx, toIdx, punchIndices };
 }
 
+export interface CourseGraphMatch {
+  fromIdx: number;
+  toIdx: number;
+  punchIndices: number[];
+  codes: string[];
+  forks: Record<string, string>;
+}
+
+/**
+ * Match a CourseDef (controls + exclusive forks) on a raw track.
+ * At each exclusive fork, picks the arm whose first control punches earliest.
+ */
+export function matchCourseGraph(
+  points: TrackPoint[],
+  def: import("./courseDef").CourseDef,
+  byCode: Map<string, { lat: number; lon: number }>,
+  fromIndex = 0
+): CourseGraphMatch | null {
+  if (points.length < 2 || def.steps.length === 0) return null;
+
+  const punchIndices: number[] = [];
+  const codes: string[] = [];
+  const forks: Record<string, string> = {};
+  let searchFrom = fromIndex;
+  let isFirst = true;
+
+  const punchControl = (code: string): number => {
+    const pt = byCode.get(code);
+    if (!pt) return -1;
+    const prefer: PunchPrefer = isFirst ? "depart" : "arrive";
+    const idx = findPunchIndex(points, pt, searchFrom, PUNCH_RADIUS_M, prefer);
+    if (idx < 0) return -1;
+    punchIndices.push(idx);
+    codes.push(code);
+    searchFrom = idx + 1;
+    isFirst = false;
+    return idx;
+  };
+
+  const matchArmSteps = (
+    steps: import("./courseDef").CourseStep[],
+    startFrom: number,
+    firstPrefer: PunchPrefer
+  ): { indices: number[]; codes: string[]; endFrom: number } | null => {
+    let from = startFrom;
+    const indices: number[] = [];
+    const armCodes: string[] = [];
+    let first = true;
+    for (const s of steps) {
+      if (s.type !== "control") return null; // nested forks not matched in v1
+      const pt = byCode.get(s.code);
+      if (!pt) return null;
+      const prefer: PunchPrefer = first ? firstPrefer : "arrive";
+      const idx = findPunchIndex(points, pt, from, PUNCH_RADIUS_M, prefer);
+      if (idx < 0) return null;
+      indices.push(idx);
+      armCodes.push(s.code);
+      from = idx + 1;
+      first = false;
+    }
+    return { indices, codes: armCodes, endFrom: from };
+  };
+
+  for (const step of def.steps) {
+    if (step.type === "control") {
+      if (punchControl(step.code) < 0) return null;
+      continue;
+    }
+
+    // Fork
+    if (step.mode === "any_order") return null;
+
+    if (step.mode === "sequence") {
+      // One-man relay: do all arms in order
+      for (const arm of step.arms) {
+        const matched = matchArmSteps(
+          arm.steps,
+          searchFrom,
+          isFirst ? "depart" : "arrive"
+        );
+        if (!matched) return null;
+        punchIndices.push(...matched.indices);
+        codes.push(...matched.codes);
+        searchFrom = matched.endFrom;
+        isFirst = false;
+      }
+      forks[step.id] = step.arms.map((a) => a.id).join(",");
+      continue;
+    }
+
+    // exclusive: pick arm with earliest first punch
+    type Cand = {
+      armId: string;
+      firstIdx: number;
+      firstDist: number;
+      indices: number[];
+      codes: string[];
+      endFrom: number;
+    };
+    const cands: Cand[] = [];
+    for (const arm of step.arms) {
+      const firstStep = arm.steps.find((s) => s.type === "control");
+      if (!firstStep || firstStep.type !== "control") continue;
+      const pt = byCode.get(firstStep.code);
+      if (!pt) continue;
+      const prefer: PunchPrefer = isFirst ? "depart" : "arrive";
+      const firstIdx = findPunchIndex(
+        points,
+        pt,
+        searchFrom,
+        PUNCH_RADIUS_M,
+        prefer
+      );
+      if (firstIdx < 0) continue;
+      const matched = matchArmSteps(arm.steps, searchFrom, prefer);
+      if (!matched) continue;
+      cands.push({
+        armId: arm.id,
+        firstIdx,
+        firstDist: haversineM(points[firstIdx], pt),
+        indices: matched.indices,
+        codes: matched.codes,
+        endFrom: matched.endFrom,
+      });
+    }
+    if (cands.length === 0) return null;
+    cands.sort((a, b) => {
+      if (a.firstIdx !== b.firstIdx) return a.firstIdx - b.firstIdx;
+      return a.firstDist - b.firstDist;
+    });
+    const best = cands[0];
+    forks[step.id] = best.armId;
+    punchIndices.push(...best.indices);
+    codes.push(...best.codes);
+    searchFrom = best.endFrom;
+    isFirst = false;
+  }
+
+  if (punchIndices.length < 2) return null;
+  const fromIdx = punchIndices[0];
+  const toIdx = punchIndices[punchIndices.length - 1];
+  if (toIdx <= fromIdx) return null;
+  return { fromIdx, toIdx, punchIndices, codes, forks };
+}
+
 /**
  * Race window for a training day: earliest first-control punch of the first
  * course phase → latest last-control punch of the last course phase

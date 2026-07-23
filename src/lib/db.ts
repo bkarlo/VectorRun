@@ -144,13 +144,18 @@ function migrate(database: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_day_phases_event ON day_phases(event_id, sort_order);
   `);
 
+  const dayPhaseCols = tableColumns(database, "day_phases");
+  if (!dayPhaseCols.has("course_json")) {
+    database.exec(`ALTER TABLE day_phases ADD COLUMN course_json TEXT`);
+  }
+
   // Bump cache when analysis payload semantics change
   const userVersion = Number(
     database.pragma("user_version", { simple: true }) ?? 0
   );
-  if (userVersion < 12) {
+  if (userVersion < 13) {
     database.exec(`DELETE FROM analysis_cache`);
-    database.pragma("user_version = 12");
+    database.pragma("user_version = 13");
   }
 }
 

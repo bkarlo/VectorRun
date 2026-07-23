@@ -1,10 +1,17 @@
 import { pathClimbM, pathDistanceM } from "./gpx";
 import { mpsToPaceMinPerKm } from "./speed";
 import {
+  collectAllCodes,
+  courseDefFromCodes,
+  legTemplatesFromCourse,
+  type CourseDef,
+  type CourseLegTemplate,
+} from "./courseDef";
+import {
   applyOffset,
   computeReferenceSync,
   findPunchIndex,
-  matchCourseWindow,
+  matchCourseGraph,
 } from "./sync";
 import { detectHesitations } from "./hesitation";
 import { applyDecisionQuality } from "./decisionQuality";
@@ -16,6 +23,7 @@ import type {
   DayPhaseRow,
   LegSplit,
   ParticipantRow,
+  RealizedRunnerPath,
   SyncStrategy,
   TrackPoint,
   TrackRow,
@@ -40,113 +48,61 @@ function resolveOrderedControls(
   return out.length >= 2 ? out : null;
 }
 
-function buildLegFromOrdered(
-  synced: { runner: RunnerTrack; points: TrackPoint[] }[],
-  from: ControlRow,
-  to: ControlRow,
-  /** Per-runner search cursor; advanced to after `to` punch when successful. */
-  cursors: Record<string, number>
-): AnalysisLeg {
-  const fromCtrl = { lat: from.lat!, lon: from.lon! };
-  const toCtrl = { lat: to.lat!, lon: to.lon! };
-  const splits: LegSplit[] = [];
-  const segments: Record<string, TrackPoint[]> = {};
-
-  for (const { runner, points } of synced) {
-    const id = runner.participant.id;
-    const searchFrom = cursors[id] ?? 0;
-    const fromIdx = findPunchIndex(points, fromCtrl, searchFrom);
-    let punchedFrom = fromIdx >= 0;
-    let punchedTo = false;
-    let timeMs: number | null = null;
-    let distanceM: number | null = null;
-    let climbM: number | null = null;
-    let hesitations = undefined as
-      | ReturnType<typeof detectHesitations>
-      | undefined;
-
-    if (fromIdx >= 0) {
-      const toIdx = findPunchIndex(points, toCtrl, fromIdx + 1);
-      punchedTo = toIdx >= 0;
-      if (toIdx > fromIdx) {
-        const segment = points.slice(fromIdx, toIdx + 1);
-        segments[id] = segment;
-        timeMs = points[toIdx].time - points[fromIdx].time;
-        distanceM = pathDistanceM(segment);
-        climbM = pathClimbM(segment);
-        const h = detectHesitations(segment);
-        if (h.length) hesitations = h;
-        cursors[id] = toIdx + 1;
-      }
-    }
-
-    splits.push({
-      participantId: id,
-      participantName: runner.participant.name,
-      color: runner.participant.color,
-      fromSeq: from.sequence,
-      toSeq: to.sequence,
-      fromCode: from.code,
-      toCode: to.code,
-      timeMs,
-      distanceM,
-      climbM,
-      punchedFrom,
-      punchedTo,
-      hesitations,
-    });
+function phaseCourseDef(phase: DayPhaseRow): CourseDef | null {
+  if (phase.courseDef?.steps.length) return phase.courseDef;
+  if (phase.controlCodes.length >= 2) {
+    return courseDefFromCodes(phase.controlCodes);
   }
-
-  applyDecisionQuality(splits, segments, toCtrl);
-
-  splits.sort((a, b) => {
-    if (a.timeMs == null && b.timeMs == null) return 0;
-    if (a.timeMs == null) return 1;
-    if (b.timeMs == null) return -1;
-    return a.timeMs - b.timeMs;
-  });
-
-  return {
-    fromSeq: from.sequence,
-    toSeq: to.sequence,
-    fromCode: from.code,
-    toCode: to.code,
-    splits,
-  };
+  return null;
 }
 
-function buildOverallFromOrdered(
+function runnerTakesLeg(
+  realized: RealizedRunnerPath | undefined,
+  tmpl: CourseLegTemplate
+): number {
+  if (!realized?.codes.length) return -1;
+  if (tmpl.forkId && tmpl.armId) {
+    const chosen = realized.forks[tmpl.forkId];
+    if (!chosen) return -1;
+    if (chosen.includes(",")) {
+      if (!chosen.split(",").includes(tmpl.armId)) return -1;
+    } else if (chosen !== tmpl.armId) {
+      return -1;
+    }
+  }
+  for (let i = 0; i < realized.codes.length - 1; i++) {
+    if (
+      realized.codes[i] === tmpl.fromCode &&
+      realized.codes[i + 1] === tmpl.toCode
+    ) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+function buildLegFromTemplate(
   synced: { runner: RunnerTrack; points: TrackPoint[] }[],
-  ordered: ControlRow[],
-  /** Cursor at start of this course phase; advanced past finish on success. */
-  cursors: Record<string, number>
+  tmpl: CourseLegTemplate,
+  byCode: Map<string, ControlRow>,
+  realizedPath: Record<string, RealizedRunnerPath>
 ): AnalysisLeg {
-  const first = ordered[0];
-  const last = ordered[ordered.length - 1];
-  const coursePts = ordered.map((c) => ({ lat: c.lat!, lon: c.lon! }));
-  const toCtrl = coursePts[coursePts.length - 1];
+  const from = byCode.get(tmpl.fromCode);
+  const to = byCode.get(tmpl.toCode);
+  const fromSeq = from?.sequence ?? 0;
+  const toSeq = to?.sequence ?? 0;
+  const toCtrl =
+    to?.lat != null && to?.lon != null
+      ? { lat: to.lat, lon: to.lon }
+      : { lat: 0, lon: 0 };
+
   const splits: LegSplit[] = [];
   const segments: Record<string, TrackPoint[]> = {};
 
   for (const { runner, points } of synced) {
     const id = runner.participant.id;
-    const searchFrom = cursors[id] ?? 0;
-    // Walk controls from cursor without mutating global until complete
-    let from = searchFrom;
-    const punchIndices: number[] = [];
-    let ok = true;
-    for (let ci = 0; ci < coursePts.length; ci++) {
-      // Start = leave base; F / intermediates = arrive (not dwell until next start)
-      const prefer = ci === 0 ? "depart" : "arrive";
-      const idx = findPunchIndex(points, coursePts[ci], from, undefined, prefer);
-      if (idx < 0) {
-        ok = false;
-        break;
-      }
-      punchIndices.push(idx);
-      from = idx + 1;
-    }
-
+    const realized = realizedPath[id];
+    const codeIdx = runnerTakesLeg(realized, tmpl);
     let punchedFrom = false;
     let punchedTo = false;
     let timeMs: number | null = null;
@@ -156,33 +112,36 @@ function buildOverallFromOrdered(
       | ReturnType<typeof detectHesitations>
       | undefined;
 
-    if (ok && punchIndices.length >= 2) {
-      const fromIdx = punchIndices[0];
-      const toIdx = punchIndices[punchIndices.length - 1];
-      punchedFrom = true;
-      punchedTo = true;
-      const segment = points.slice(fromIdx, toIdx + 1);
-      segments[id] = segment;
-      timeMs = points[toIdx].time - points[fromIdx].time;
-      distanceM = pathDistanceM(segment);
-      climbM = pathClimbM(segment);
-      const h = detectHesitations(segment);
-      if (h.length) hesitations = h;
-      cursors[id] = toIdx + 1;
-    } else {
-      const fromIdx = findPunchIndex(points, coursePts[0], searchFrom);
-      punchedFrom = fromIdx >= 0;
-      punchedTo = false;
+    if (codeIdx >= 0 && realized) {
+      const fromIdx = realized.punchIndices[codeIdx];
+      const toIdx = realized.punchIndices[codeIdx + 1];
+      punchedFrom = fromIdx != null && fromIdx >= 0;
+      punchedTo = toIdx != null && toIdx >= 0;
+      if (
+        punchedFrom &&
+        punchedTo &&
+        toIdx > fromIdx &&
+        fromIdx < points.length &&
+        toIdx < points.length
+      ) {
+        const segment = points.slice(fromIdx, toIdx + 1);
+        segments[id] = segment;
+        timeMs = points[toIdx].time - points[fromIdx].time;
+        distanceM = pathDistanceM(segment);
+        climbM = pathClimbM(segment);
+        const h = detectHesitations(segment);
+        if (h.length) hesitations = h;
+      }
     }
 
     splits.push({
       participantId: id,
       participantName: runner.participant.name,
       color: runner.participant.color,
-      fromSeq: first.sequence,
-      toSeq: last.sequence,
-      fromCode: first.code,
-      toCode: last.code,
+      fromSeq,
+      toSeq,
+      fromCode: tmpl.fromCode,
+      toCode: tmpl.toCode,
       timeMs,
       distanceM,
       climbM,
@@ -192,6 +151,7 @@ function buildOverallFromOrdered(
     });
   }
 
+  // Decision quality only among runners who actually ran this leg
   applyDecisionQuality(splits, segments, toCtrl);
 
   splits.sort((a, b) => {
@@ -202,17 +162,106 @@ function buildOverallFromOrdered(
   });
 
   return {
-    fromSeq: first.sequence,
-    toSeq: last.sequence,
-    fromCode: first.code,
-    toCode: last.code,
+    fromSeq,
+    toSeq,
+    fromCode: tmpl.fromCode,
+    toCode: tmpl.toCode,
+    forkId: tmpl.forkId,
+    forkLabel: tmpl.forkLabel,
+    armId: tmpl.armId,
+    armLabel: tmpl.armLabel,
+    splits,
+  };
+}
+
+function buildOverallFromRealized(
+  synced: { runner: RunnerTrack; points: TrackPoint[] }[],
+  realizedPath: Record<string, RealizedRunnerPath>,
+  byCode: Map<string, ControlRow>
+): AnalysisLeg {
+  const splits: LegSplit[] = [];
+  const segments: Record<string, TrackPoint[]> = {};
+  let fromCode = "S";
+  let toCode = "F";
+  let fromSeq = 0;
+  let toSeq = 0;
+
+  for (const { runner, points } of synced) {
+    const id = runner.participant.id;
+    const realized = realizedPath[id];
+    let punchedFrom = false;
+    let punchedTo = false;
+    let timeMs: number | null = null;
+    let distanceM: number | null = null;
+    let climbM: number | null = null;
+    let hesitations = undefined as
+      | ReturnType<typeof detectHesitations>
+      | undefined;
+
+    if (realized && realized.punchIndices.length >= 2 && points.length >= 2) {
+      const fromIdx = realized.punchIndices[0];
+      const toIdx = realized.punchIndices[realized.punchIndices.length - 1];
+      fromCode = realized.codes[0] ?? fromCode;
+      toCode = realized.codes[realized.codes.length - 1] ?? toCode;
+      fromSeq = byCode.get(fromCode)?.sequence ?? 0;
+      toSeq = byCode.get(toCode)?.sequence ?? 0;
+      punchedFrom = true;
+      punchedTo = true;
+      if (toIdx > fromIdx && toIdx < points.length) {
+        const segment = points.slice(fromIdx, toIdx + 1);
+        segments[id] = segment;
+        timeMs = points[toIdx].time - points[fromIdx].time;
+        distanceM = pathDistanceM(segment);
+        climbM = pathClimbM(segment);
+        const h = detectHesitations(segment);
+        if (h.length) hesitations = h;
+      }
+    }
+
+    splits.push({
+      participantId: id,
+      participantName: runner.participant.name,
+      color: runner.participant.color,
+      fromSeq,
+      toSeq,
+      fromCode,
+      toCode,
+      timeMs,
+      distanceM,
+      climbM,
+      punchedFrom,
+      punchedTo,
+      hesitations,
+    });
+  }
+
+  const lastCtrl = byCode.get(toCode);
+  const toCtrl =
+    lastCtrl?.lat != null && lastCtrl?.lon != null
+      ? { lat: lastCtrl.lat, lon: lastCtrl.lon }
+      : { lat: 0, lon: 0 };
+  applyDecisionQuality(splits, segments, toCtrl);
+
+  splits.sort((a, b) => {
+    if (a.timeMs == null && b.timeMs == null) return 0;
+    if (a.timeMs == null) return 1;
+    if (b.timeMs == null) return -1;
+    return a.timeMs - b.timeMs;
+  });
+
+  return {
+    fromSeq,
+    toSeq,
+    fromCode,
+    toCode,
     splits,
   };
 }
 
 function emptyCoursePhase(
   phase: DayPhaseRow,
-  runners: RunnerTrack[]
+  runners: RunnerTrack[],
+  def: CourseDef | null
 ): AnalysisCoursePhase {
   const syncOffsets: Record<string, number> = {};
   const syncDeltasMs: Record<string, number> = {};
@@ -224,7 +273,8 @@ function emptyCoursePhase(
     id: phase.id,
     name: phase.name,
     sortOrder: phase.sort_order,
-    controlCodes: phase.controlCodes,
+    controlCodes: def ? collectAllCodes(def) : phase.controlCodes,
+    courseDef: def,
     overall: null,
     legs: [],
     syncOffsets,
@@ -232,13 +282,14 @@ function emptyCoursePhase(
     referenceId: null,
     referenceWallTimeMs: null,
     windows: {},
+    realizedPath: {},
   };
 }
 
 /**
  * Analyze event using the day plan:
- * 1) Split each runner into course windows on real GPS time (no sync).
- * 2) Sync + analyze each course independently (legacy single-course logic).
+ * 1) Match each course graph on real GPS time (exclusive forks → best arm).
+ * 2) Sync + analyze each course independently on realized slices.
  */
 export function analyzeEvent(
   referenceId: string | null,
@@ -247,8 +298,12 @@ export function analyzeEvent(
   dayPhases: DayPhaseRow[]
 ): AnalysisPayload {
   const byCode = new Map(controls.map((c) => [c.code, c]));
+  const geoByCode = new Map(
+    controls
+      .filter((c) => c.lat != null && c.lon != null)
+      .map((c) => [c.code, { lat: c.lat!, lon: c.lon! }])
+  );
 
-  // Per-runner cursor on raw tracks — advances only with successful course matches
   const rawCursors: Record<string, number> = {};
   for (const r of runners) rawCursors[r.participant.id] = 0;
 
@@ -256,33 +311,62 @@ export function analyzeEvent(
 
   for (const phase of dayPhases) {
     if (phase.kind !== "course") continue;
-    const ordered = resolveOrderedControls(phase.controlCodes, byCode);
-    if (!ordered) {
-      coursePhases.push(emptyCoursePhase(phase, runners));
+    const def = phaseCourseDef(phase);
+    if (!def) {
+      coursePhases.push(emptyCoursePhase(phase, runners, null));
       continue;
     }
 
-    const coursePts = ordered.map((c) => ({ lat: c.lat!, lon: c.lon! }));
+    const allCodes = collectAllCodes(def);
+    const orderedForSync = resolveOrderedControls(allCodes, byCode);
+    if (!orderedForSync) {
+      coursePhases.push(emptyCoursePhase(phase, runners, def));
+      continue;
+    }
+
     const windows: Record<string, { fromIdx: number; toIdx: number }> = {};
+    const realizedPath: Record<string, RealizedRunnerPath> = {};
     const sliced: { runner: RunnerTrack; points: TrackPoint[] }[] = [];
 
     for (const runner of runners) {
       const id = runner.participant.id;
       const searchFrom = rawCursors[id] ?? 0;
-      const win = matchCourseWindow(runner.points, coursePts, searchFrom);
+      const win = matchCourseGraph(
+        runner.points,
+        def,
+        geoByCode,
+        searchFrom
+      );
       if (!win) {
         sliced.push({ runner, points: [] });
         continue;
       }
       rawCursors[id] = win.toIdx + 1;
       windows[id] = { fromIdx: win.fromIdx, toIdx: win.toIdx };
+      realizedPath[id] = {
+        codes: win.codes,
+        forks: win.forks,
+        punchIndices: win.punchIndices.map((i) => i - win.fromIdx),
+      };
       sliced.push({
         runner,
         points: runner.points.slice(win.fromIdx, win.toIdx + 1),
       });
     }
 
-    // Sync only within this course's real-time slices
+    // Sync controls: prefer spine start (first control step) for punch strategies
+    const firstSpine = def.steps.find((s) => s.type === "control");
+    const syncControls =
+      firstSpine && firstSpine.type === "control"
+        ? resolveOrderedControls(
+            [
+              firstSpine.code,
+              ...allCodes.filter((c) => c !== firstSpine.code),
+            ],
+            byCode
+          ) ?? orderedForSync
+        : orderedForSync;
+
     const sync = computeReferenceSync(
       referenceId,
       sliced.map(({ runner, points }) => ({
@@ -292,7 +376,7 @@ export function analyzeEvent(
           "motion_start") as SyncStrategy,
         manualDeltaMs: runner.track.start_offset_ms,
       })),
-      ordered
+      syncControls
     );
 
     const synced = sliced.map(({ runner, points }) => ({
@@ -300,26 +384,18 @@ export function analyzeEvent(
       points: applyOffset(points, sync.offsets[runner.participant.id] ?? 0),
     }));
 
-    const legCursors: Record<string, number> = {};
-    const overallCursors: Record<string, number> = {};
-    for (const s of synced) {
-      legCursors[s.runner.participant.id] = 0;
-      overallCursors[s.runner.participant.id] = 0;
-    }
-
-    const legs: AnalysisLeg[] = [];
-    for (let i = 0; i < ordered.length - 1; i++) {
-      legs.push(
-        buildLegFromOrdered(synced, ordered[i], ordered[i + 1], legCursors)
-      );
-    }
-    const overall = buildOverallFromOrdered(synced, ordered, overallCursors);
+    const templates = legTemplatesFromCourse(def);
+    const legs = templates.map((tmpl) =>
+      buildLegFromTemplate(synced, tmpl, byCode, realizedPath)
+    );
+    const overall = buildOverallFromRealized(synced, realizedPath, byCode);
 
     coursePhases.push({
       id: phase.id,
       name: phase.name,
       sortOrder: phase.sort_order,
-      controlCodes: phase.controlCodes,
+      controlCodes: allCodes,
+      courseDef: def,
       overall,
       legs,
       syncOffsets: sync.offsets,
@@ -327,6 +403,7 @@ export function analyzeEvent(
       referenceId: sync.referenceId,
       referenceWallTimeMs: sync.referenceWallTimeMs,
       windows,
+      realizedPath,
     });
   }
 

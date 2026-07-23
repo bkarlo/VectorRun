@@ -20,10 +20,7 @@ import {
   applyOffset,
   computeRaceWindow,
   computeReferenceSync,
-  courseSegmentIndices,
-  courseSegmentPoints,
   findPunchIndex,
-  legSegmentIndices,
   legSegmentPoints,
 } from "@/lib/sync";
 import {
@@ -36,7 +33,10 @@ import {
 } from "@/lib/analysis";
 import { isExtraDistanceFlag, isNotableComeBack } from "@/lib/decisionQuality";
 import {
+  actionAppendGpxToRunner,
   actionDeleteParticipant,
+  actionFillTrackPrefix,
+  actionMergeRunnerTracks,
   actionRenameParticipant,
   actionSetReference,
   actionSetRunnerDelta,
@@ -44,9 +44,16 @@ import {
 } from "@/app/actions";
 import dynamic from "next/dynamic";
 import SpeedChart from "./SpeedChart";
+import {
+  averageSpeedMps,
+  fillPreviewVertices,
+  mpsToPaceMinPerKm,
+  paceMinPerKmToMps,
+} from "@/lib/trackRepair";
 
 const SessionMap = dynamic(() => import("./SessionMap"), { ssr: false });
 
+type FillLegRow = { controlId: string; paceMinPerKm: string };
 export interface SessionTrack {
   participant: ParticipantRow;
   track: TrackRow | null;
@@ -86,6 +93,14 @@ export default function SessionWorkspace({
     "map"
   );
   const [mapFullscreen, setMapFullscreen] = useState(false);
+  const [repairTargetId, setRepairTargetId] = useState("");
+  const [mergeSourceId, setMergeSourceId] = useState("");
+  const [fillLegs, setFillLegs] = useState<FillLegRow[]>([]);
+  const [fillOpen, setFillOpen] = useState(false);
+  const [repairPanelOpen, setRepairPanelOpen] = useState(false);
+  const [repairStatus, setRepairStatus] = useState("");
+  const [repairBusy, setRepairBusy] = useState(false);
+  const appendInputRef = useRef<HTMLInputElement>(null);
   const playRef = useRef<number | null>(null);
   const PLAYBACK_SPEEDS = [1, 2, 5, 10, 30, 60, 120, 300] as const;
 
@@ -173,6 +188,19 @@ export default function SessionWorkspace({
 
   const raceTimeRange = useMemo(() => {
     if (event.race_window_enabled === false) return null;
+    // Synced tracks are already sliced to the active course window
+    if (
+      activeCourse &&
+      Object.keys(activeCourse.windows ?? {}).length > 0
+    ) {
+      if (
+        !Number.isFinite(fullTimeRange.min) ||
+        fullTimeRange.max <= fullTimeRange.min
+      ) {
+        return null;
+      }
+      return { min: fullTimeRange.min, max: fullTimeRange.max + 1_000 };
+    }
     if (!activeCourse?.controlCodes.length) return null;
     const byCode = new Map(controls.map((c) => [c.code, c]));
     const ordered: ControlRow[] = [];
@@ -191,6 +219,7 @@ export default function SessionWorkspace({
     controls,
     activeCourse,
     event.race_window_enabled,
+    fullTimeRange,
   ]);
 
   /** Map / fullscreen timeline: active course (race window when enabled). */
@@ -208,8 +237,12 @@ export default function SessionWorkspace({
 
   const currentLegCtrl = useMemo(() => {
     if (!currentView) return null;
-    const from = controls.find((c) => c.sequence === currentView.fromSeq);
-    const to = controls.find((c) => c.sequence === currentView.toSeq);
+    const from =
+      controls.find((c) => c.code === currentView.fromCode) ??
+      controls.find((c) => c.sequence === currentView.fromSeq);
+    const to =
+      controls.find((c) => c.code === currentView.toCode) ??
+      controls.find((c) => c.sequence === currentView.toSeq);
     if (
       !from ||
       !to ||
@@ -223,19 +256,59 @@ export default function SessionWorkspace({
     return {
       from: { lat: from.lat, lon: from.lon },
       to: { lat: to.lat, lon: to.lon },
+      fromCode: currentView.fromCode,
+      toCode: currentView.toCode,
+      armId: currentView.armId,
+      forkId: currentView.forkId,
     };
   }, [currentView, controls]);
 
-  const courseCtrlPoints = useMemo(() => {
-    if (!activeCourse?.controlCodes.length) return [];
-    const byCode = new Map(controls.map((c) => [c.code, c]));
-    const pts: { lat: number; lon: number }[] = [];
-    for (const code of activeCourse.controlCodes) {
-      const c = byCode.get(code);
-      if (c?.lat != null && c.lon != null) pts.push({ lat: c.lat, lon: c.lon });
+  /** Prefer realized path points for a runner (fork-aware). */
+  const pointsForView = (
+    participantId: string,
+    syncedPoints: TrackPoint[]
+  ): TrackPoint[] | null => {
+    const realized = activeCourse?.realizedPath?.[participantId];
+    if (viewingOverall) {
+      if (realized && realized.punchIndices.length >= 2) {
+        const a = realized.punchIndices[0];
+        const b = realized.punchIndices[realized.punchIndices.length - 1];
+        if (b > a) return syncedPoints.slice(a, b + 1);
+      }
+      return syncedPoints.length ? syncedPoints : null;
     }
-    return pts;
-  }, [activeCourse, controls]);
+    if (!currentView || !realized) {
+      if (!currentLegCtrl) return null;
+      return legSegmentPoints(
+        syncedPoints,
+        currentLegCtrl.from,
+        currentLegCtrl.to
+      );
+    }
+    if (
+      currentView.forkId &&
+      currentView.armId &&
+      realized.forks[currentView.forkId] !== currentView.armId &&
+      !String(realized.forks[currentView.forkId] ?? "")
+        .split(",")
+        .includes(currentView.armId)
+    ) {
+      return null;
+    }
+    for (let i = 0; i < realized.codes.length - 1; i++) {
+      if (
+        realized.codes[i] === currentView.fromCode &&
+        realized.codes[i + 1] === currentView.toCode
+      ) {
+        const a = realized.punchIndices[i];
+        const b = realized.punchIndices[i + 1];
+        if (a != null && b != null && b > a) {
+          return syncedPoints.slice(a, b + 1);
+        }
+      }
+    }
+    return null;
+  };
 
   /** Zoomed window for current analysis view (overall or leg). */
   const viewTimeRange = useMemo(() => {
@@ -243,18 +316,10 @@ export default function SessionWorkspace({
     let maxTo = -Infinity;
     for (const t of syncedTracks) {
       if (!selected[t.participant.id]) continue;
-      const idx = viewingOverall
-        ? courseSegmentIndices(t.syncedPoints, courseCtrlPoints)
-        : currentLegCtrl
-          ? legSegmentIndices(
-              t.syncedPoints,
-              currentLegCtrl.from,
-              currentLegCtrl.to
-            )
-          : null;
-      if (!idx) continue;
-      minFrom = Math.min(minFrom, t.syncedPoints[idx.fromIdx].time);
-      maxTo = Math.max(maxTo, t.syncedPoints[idx.toIdx].time);
+      const pts = pointsForView(t.participant.id, t.syncedPoints);
+      if (!pts?.length) continue;
+      minFrom = Math.min(minFrom, pts[0].time);
+      maxTo = Math.max(maxTo, pts[pts.length - 1].time);
     }
     if (!Number.isFinite(minFrom) || !Number.isFinite(maxTo) || maxTo <= minFrom) {
       return null;
@@ -262,11 +327,31 @@ export default function SessionWorkspace({
     return { min: minFrom, max: maxTo };
   }, [
     viewingOverall,
-    courseCtrlPoints,
+    currentView,
     currentLegCtrl,
     syncedTracks,
     selected,
+    activeCourse,
   ]);
+
+  /** Control points along a realized path (follow runner or first match). */
+  const courseCtrlPoints = useMemo(() => {
+    const byCode = new Map(controls.map((c) => [c.code, c]));
+    const realized = activeCourse?.realizedPath ?? {};
+    const id =
+      (followRunnerId && realized[followRunnerId]
+        ? followRunnerId
+        : Object.keys(realized).find((k) => realized[k]?.codes.length)) || "";
+    const codes = id
+      ? realized[id].codes
+      : (activeCourse?.controlCodes ?? []);
+    const pts: { lat: number; lon: number }[] = [];
+    for (const code of codes) {
+      const c = byCode.get(code);
+      if (c?.lat != null && c.lon != null) pts.push({ lat: c.lat, lon: c.lon });
+    }
+    return pts;
+  }, [activeCourse, controls, followRunnerId]);
 
   const splitsPlayback =
     mobileTab === "splits" && viewTimeRange != null;
@@ -362,6 +447,140 @@ export default function SessionWorkspace({
     window.location.reload();
   };
 
+  const geoControls = useMemo(
+    () => controls.filter((c) => c.lat != null && c.lon != null),
+    [controls]
+  );
+
+  const repairTarget = useMemo(() => {
+    const id =
+      repairTargetId ||
+      initialTracks.find((t) => t.points.length > 0)?.participant.id ||
+      "";
+    return initialTracks.find((t) => t.participant.id === id) ?? null;
+  }, [repairTargetId, initialTracks]);
+
+  const suggestedPaceMinPerKm = useMemo(() => {
+    if (!repairTarget || repairTarget.points.length < 2) return "6.5";
+    const pace = mpsToPaceMinPerKm(averageSpeedMps(repairTarget.points));
+    return pace.toFixed(1);
+  }, [repairTarget]);
+
+  const fillPreview = useMemo(() => {
+    if (
+      !repairPanelOpen ||
+      !fillOpen ||
+      !repairTarget?.points.length ||
+      fillLegs.length === 0
+    ) {
+      return null;
+    }
+    const waypoints: { lat: number; lon: number }[] = [];
+    for (const leg of fillLegs) {
+      const c = geoControls.find((x) => x.id === leg.controlId);
+      if (!c || c.lat == null || c.lon == null) return null;
+      waypoints.push({ lat: c.lat, lon: c.lon });
+    }
+    const first = repairTarget.points[0];
+    return fillPreviewVertices(waypoints, { lat: first.lat, lon: first.lon });
+  }, [repairPanelOpen, fillOpen, fillLegs, repairTarget, geoControls]);
+
+  const openFillEditor = () => {
+    setFillOpen(true);
+    setFillLegs([{ controlId: geoControls[0]?.id ?? "", paceMinPerKm: suggestedPaceMinPerKm }]);
+    setRepairStatus("");
+  };
+
+  const onAppendGpx = async (files: FileList | null) => {
+    if (!files?.length || !repairTarget) return;
+    const file = files[0];
+    setRepairBusy(true);
+    setRepairStatus("Appending…");
+    try {
+      const text = await file.text();
+      const res = await actionAppendGpxToRunner(
+        event.id,
+        repairTarget.participant.id,
+        text,
+        file.name
+      );
+      if (!res.ok) {
+        setRepairStatus(res.error);
+        setRepairBusy(false);
+        return;
+      }
+      setRepairStatus(`Merged (${res.pointCount} pts) — refreshing…`);
+      window.location.reload();
+    } catch (e) {
+      setRepairStatus(e instanceof Error ? e.message : "Append failed");
+      setRepairBusy(false);
+    }
+  };
+
+  const onMergeRunner = async () => {
+    if (!repairTarget || !mergeSourceId) return;
+    const source = initialTracks.find(
+      (t) => t.participant.id === mergeSourceId
+    );
+    const sourceName = source?.participant.name ?? "other runner";
+    const targetName = repairTarget.participant.name;
+    if (
+      !window.confirm(
+        `Merge into ${targetName} and remove ${sourceName}?`
+      )
+    ) {
+      return;
+    }
+    setRepairBusy(true);
+    setRepairStatus("Merging…");
+    const res = await actionMergeRunnerTracks(
+      event.id,
+      repairTarget.participant.id,
+      mergeSourceId
+    );
+    if (!res.ok) {
+      setRepairStatus(res.error);
+      setRepairBusy(false);
+      return;
+    }
+    setRepairStatus(`Merged (${res.pointCount} pts) — refreshing…`);
+    window.location.reload();
+  };
+
+  const onApplyFill = async () => {
+    if (!repairTarget || fillLegs.length === 0) return;
+    const controlIds: string[] = [];
+    const speedsMps: number[] = [];
+    for (const leg of fillLegs) {
+      if (!leg.controlId) {
+        setRepairStatus("Select a control for each leg");
+        return;
+      }
+      const pace = Number(leg.paceMinPerKm);
+      if (!Number.isFinite(pace) || pace <= 0) {
+        setRepairStatus("Each leg needs a positive pace (min/km)");
+        return;
+      }
+      controlIds.push(leg.controlId);
+      speedsMps.push(paceMinPerKmToMps(pace));
+    }
+    setRepairBusy(true);
+    setRepairStatus("Filling…");
+    const res = await actionFillTrackPrefix(
+      event.id,
+      repairTarget.participant.id,
+      controlIds,
+      speedsMps
+    );
+    if (!res.ok) {
+      setRepairStatus(res.error);
+      setRepairBusy(false);
+      return;
+    }
+    setRepairStatus(`Filled (${res.pointCount} pts) — refreshing…`);
+    window.location.reload();
+  };
+
   const duration = playbackRange.max - playbackRange.min;
   const relMs = Math.max(0, replayMs - playbackRange.min);
 
@@ -425,15 +644,7 @@ export default function SessionWorkspace({
     return syncedTracks
       .filter((t) => selected[t.participant.id])
       .map((t) => {
-        const pts = viewingOverall
-          ? courseSegmentPoints(t.syncedPoints, courseCtrlPoints)
-          : currentLegCtrl
-            ? legSegmentPoints(
-                t.syncedPoints,
-                currentLegCtrl.from,
-                currentLegCtrl.to
-              )
-            : null;
+        const pts = pointsForView(t.participant.id, t.syncedPoints);
         if (!pts?.length) return null;
         return {
           id: t.participant.id,
@@ -445,10 +656,11 @@ export default function SessionWorkspace({
       .filter((x): x is NonNullable<typeof x> => x != null);
   }, [
     viewingOverall,
-    courseCtrlPoints,
+    currentView,
     currentLegCtrl,
     syncedTracks,
     selected,
+    activeCourse,
   ]);
 
   const storyMarkers = useMemo(() => {
@@ -532,15 +744,7 @@ export default function SessionWorkspace({
       } else if (!selected[t.participant.id]) {
         continue;
       }
-      const seg = viewingOverall
-        ? courseSegmentPoints(t.syncedPoints, courseCtrlPoints)
-        : currentLegCtrl
-          ? legSegmentPoints(
-              t.syncedPoints,
-              currentLegCtrl.from,
-              currentLegCtrl.to
-            )
-          : null;
+      const seg = pointsForView(t.participant.id, t.syncedPoints);
       if (!seg?.length) continue;
       const step = Math.max(1, Math.floor(seg.length / 40));
       for (let i = 0; i < seg.length; i += step) {
@@ -676,10 +880,11 @@ export default function SessionWorkspace({
         className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-[minmax(260px,340px)_1fr_minmax(300px,400px)]"
       >
         <aside
-          className={`border-r border-forest-200 bg-white/70 overflow-auto p-3 space-y-3 ${
+          className={`border-r border-forest-200 bg-white/70 min-h-0 ${
             mobileTab === "runners" ? "flex flex-col" : "hidden"
           } lg:flex lg:flex-col`}
         >
+          <div className="flex-1 min-h-0 overflow-auto p-3 space-y-3">
           <h2 className="text-xs font-semibold uppercase tracking-wider text-forest-600">
             Runners
           </h2>
@@ -960,6 +1165,293 @@ export default function SessionWorkspace({
           {uploadStatus && (
             <p className="text-xs text-forest-600 font-mono">{uploadStatus}</p>
           )}
+          </div>
+
+          {initialTracks.some((t) => t.points.length > 0) && (
+            <div className="shrink-0 border-t border-forest-200 bg-white/90 p-2 space-y-2">
+              {repairPanelOpen && (
+                <div className="rounded-lg border border-forest-200 bg-white p-3 space-y-2.5 max-h-[50dvh] overflow-auto">
+                  <div className="flex items-center justify-between gap-2">
+                    <h3 className="text-xs font-semibold uppercase tracking-wider text-forest-600">
+                      Repair track
+                    </h3>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setRepairPanelOpen(false);
+                        setFillOpen(false);
+                        setFillLegs([]);
+                        setRepairStatus("");
+                      }}
+                      className="text-forest-500 hover:text-forest-800 text-xs px-1"
+                      title="Close repair"
+                      aria-label="Close repair"
+                    >
+                      ×
+                    </button>
+                  </div>
+                  <label className="block text-xs text-forest-600 space-y-1">
+                    Runner
+                    <select
+                      className="w-full rounded-md border border-forest-200 bg-white px-2 py-1.5 text-sm text-forest-800"
+                      value={
+                        repairTargetId ||
+                        initialTracks.find((t) => t.points.length > 0)
+                          ?.participant.id ||
+                        ""
+                      }
+                      onChange={(e) => {
+                        setRepairTargetId(e.target.value);
+                        setFillOpen(false);
+                        setMergeSourceId("");
+                        setRepairStatus("");
+                      }}
+                      disabled={repairBusy}
+                    >
+                      {initialTracks
+                        .filter((t) => t.points.length > 0)
+                        .map((t) => (
+                          <option
+                            key={t.participant.id}
+                            value={t.participant.id}
+                          >
+                            {t.participant.name}
+                          </option>
+                        ))}
+                    </select>
+                  </label>
+
+                  <div className="flex flex-col gap-1.5">
+                    <button
+                      type="button"
+                      disabled={repairBusy || !repairTarget}
+                      onClick={() => appendInputRef.current?.click()}
+                      className="rounded-md border border-forest-200 px-2 py-1.5 text-sm text-forest-800 hover:bg-forest-50 disabled:opacity-50"
+                    >
+                      Append GPX file…
+                    </button>
+                    <input
+                      ref={appendInputRef}
+                      type="file"
+                      accept=".gpx,application/gpx+xml,text/xml"
+                      className="hidden"
+                      onChange={(e) => {
+                        void onAppendGpx(e.target.files);
+                        e.target.value = "";
+                      }}
+                    />
+
+                    <div className="flex gap-1.5 items-stretch">
+                      <select
+                        className="min-w-0 flex-1 rounded-md border border-forest-200 bg-white px-2 py-1.5 text-sm text-forest-800"
+                        value={mergeSourceId}
+                        onChange={(e) => setMergeSourceId(e.target.value)}
+                        disabled={repairBusy}
+                        aria-label="Merge from runner"
+                      >
+                        <option value="">Merge from runner…</option>
+                        {initialTracks
+                          .filter(
+                            (t) =>
+                              t.points.length > 0 &&
+                              t.participant.id !==
+                                repairTarget?.participant.id
+                          )
+                          .map((t) => (
+                            <option
+                              key={t.participant.id}
+                              value={t.participant.id}
+                            >
+                              {t.participant.name}
+                            </option>
+                          ))}
+                      </select>
+                      <button
+                        type="button"
+                        disabled={
+                          repairBusy || !mergeSourceId || !repairTarget
+                        }
+                        onClick={() => void onMergeRunner()}
+                        className="shrink-0 rounded-md bg-forest-700 text-white px-2.5 py-1.5 text-sm font-medium disabled:opacity-50"
+                      >
+                        Merge
+                      </button>
+                    </div>
+
+                    {!fillOpen ? (
+                      <button
+                        type="button"
+                        disabled={
+                          repairBusy ||
+                          !repairTarget ||
+                          geoControls.length === 0
+                        }
+                        onClick={openFillEditor}
+                        className="rounded-md border border-forest-200 px-2 py-1.5 text-sm text-forest-800 hover:bg-forest-50 disabled:opacity-50"
+                        title={
+                          geoControls.length === 0
+                            ? "Place controls on the map first"
+                            : undefined
+                        }
+                      >
+                        Fill missing start…
+                      </button>
+                    ) : (
+                      <div className="space-y-2 rounded-md border border-dashed border-teal-300 bg-teal-50/40 p-2">
+                        <p className="text-[11px] text-forest-600 leading-snug">
+                          Straight legs from controls to the first GPS point.
+                          Pace in min/km. Dashed preview on the map.
+                        </p>
+                        {fillLegs.map((leg, i) => (
+                          <div key={i} className="flex gap-1 items-center">
+                            <select
+                              className="min-w-0 flex-1 rounded border border-forest-200 bg-white px-1.5 py-1 text-xs"
+                              value={leg.controlId}
+                              onChange={(e) =>
+                                setFillLegs((rows) =>
+                                  rows.map((r, j) =>
+                                    j === i
+                                      ? { ...r, controlId: e.target.value }
+                                      : r
+                                  )
+                                )
+                              }
+                              disabled={repairBusy}
+                              aria-label={`Waypoint ${i + 1} control`}
+                            >
+                              <option value="">Control…</option>
+                              {geoControls.map((c) => (
+                                <option key={c.id} value={c.id}>
+                                  {c.code}
+                                </option>
+                              ))}
+                            </select>
+                            <input
+                              type="number"
+                              min={1}
+                              step={0.1}
+                              className="w-[4.25rem] rounded border border-forest-200 px-1 py-1 text-xs font-mono tabular-nums"
+                              value={leg.paceMinPerKm}
+                              onChange={(e) =>
+                                setFillLegs((rows) =>
+                                  rows.map((r, j) =>
+                                    j === i
+                                      ? {
+                                          ...r,
+                                          paceMinPerKm: e.target.value,
+                                        }
+                                      : r
+                                  )
+                                )
+                              }
+                              disabled={repairBusy}
+                              aria-label={`Pace min/km for leg ${i + 1}`}
+                              title="min/km"
+                            />
+                            <span className="text-[10px] text-forest-500 shrink-0">
+                              ′/km
+                            </span>
+                            <button
+                              type="button"
+                              className="text-red-600 text-xs px-0.5 disabled:opacity-40"
+                              disabled={repairBusy || fillLegs.length <= 1}
+                              onClick={() =>
+                                setFillLegs((rows) =>
+                                  rows.filter((_, j) => j !== i)
+                                )
+                              }
+                              title="Remove leg"
+                            >
+                              ×
+                            </button>
+                          </div>
+                        ))}
+                        <div className="flex flex-wrap gap-1.5">
+                          <button
+                            type="button"
+                            disabled={repairBusy}
+                            onClick={() =>
+                              setFillLegs((rows) => [
+                                ...rows,
+                                {
+                                  controlId: geoControls[0]?.id ?? "",
+                                  paceMinPerKm: suggestedPaceMinPerKm,
+                                },
+                              ])
+                            }
+                            className="rounded border border-forest-200 px-2 py-1 text-xs hover:bg-white"
+                          >
+                            Add leg
+                          </button>
+                          <button
+                            type="button"
+                            disabled={repairBusy}
+                            onClick={() => {
+                              setFillOpen(false);
+                              setFillLegs([]);
+                            }}
+                            className="rounded border border-forest-200 px-2 py-1 text-xs hover:bg-white"
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            type="button"
+                            disabled={repairBusy}
+                            onClick={() => void onApplyFill()}
+                            className="rounded bg-teal-700 text-white px-2 py-1 text-xs font-medium disabled:opacity-50"
+                          >
+                            Apply fill
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                  {repairStatus && (
+                    <p className="text-xs text-forest-600 font-mono">
+                      {repairStatus}
+                    </p>
+                  )}
+                </div>
+              )}
+              <div className="flex justify-end">
+                <button
+                  type="button"
+                  onClick={() =>
+                    setRepairPanelOpen((open) => {
+                      if (open) {
+                        setFillOpen(false);
+                        setFillLegs([]);
+                        setRepairStatus("");
+                      }
+                      return !open;
+                    })
+                  }
+                  className={`rounded-lg border p-2 transition-colors ${
+                    repairPanelOpen
+                      ? "border-forest-400 bg-forest-100 text-forest-900"
+                      : "border-forest-200 bg-white text-forest-600 hover:bg-forest-50 hover:text-forest-800"
+                  }`}
+                  title="Repair track"
+                  aria-label="Repair track"
+                  aria-expanded={repairPanelOpen}
+                >
+                  <svg
+                    width="18"
+                    height="18"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    aria-hidden
+                  >
+                    <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+          )}
         </aside>
 
         <div
@@ -995,6 +1487,7 @@ export default function SessionWorkspace({
               raceWindow={raceTimeRange}
               resizeToken={`${mobileTab}-${mapFullscreen}`}
               mapOpacity={map?.opacity ?? 0.55}
+              fillPreview={fillPreview}
             />
             <button
               type="button"
@@ -1151,6 +1644,7 @@ export default function SessionWorkspace({
                   raceWindow={raceTimeRange}
                   resizeToken={`splits-${mobileTab}-${analysisIndex}`}
                   mapOpacity={map?.opacity ?? 0.55}
+                  fillPreview={fillPreview}
                 />
               </div>
               <div className="bg-white/95 px-3 py-2 space-y-1.5 border-t border-forest-100">
@@ -1241,6 +1735,7 @@ export default function SessionWorkspace({
                     )}
                     {activeLegs.map((leg, i) => (
                       <option key={i} value={i}>
+                        {leg.armLabel ? `${leg.armLabel}: ` : ""}
                         {leg.fromCode} → {leg.toCode}
                       </option>
                     ))}
@@ -1288,6 +1783,40 @@ export default function SessionWorkspace({
                                 style={{ background: s.color }}
                               />
                               {s.participantName}
+                              {!viewingOverall &&
+                                currentView?.armLabel &&
+                                s.timeMs != null && (
+                                  <span className="ml-1.5 rounded bg-amber-100 text-amber-900 px-1 py-0.5 text-[10px] font-mono font-semibold align-middle">
+                                    {currentView.armLabel}
+                                  </span>
+                                )}
+                              {viewingOverall &&
+                                (() => {
+                                  const forks =
+                                    activeCourse?.realizedPath?.[s.participantId]
+                                      ?.forks;
+                                  if (!forks || !activeCourse?.courseDef)
+                                    return null;
+                                  const labels: string[] = [];
+                                  for (const step of activeCourse.courseDef
+                                    .steps) {
+                                    if (step.type !== "fork") continue;
+                                    const armId = forks[step.id];
+                                    if (!armId) continue;
+                                    const arm = step.arms.find(
+                                      (a) =>
+                                        a.id === armId ||
+                                        armId.split(",").includes(a.id)
+                                    );
+                                    if (arm) labels.push(arm.label);
+                                  }
+                                  if (!labels.length) return null;
+                                  return (
+                                    <span className="ml-1.5 rounded bg-amber-100 text-amber-900 px-1 py-0.5 text-[10px] font-mono font-semibold align-middle">
+                                      {labels.join("·")}
+                                    </span>
+                                  );
+                                })()}
                             </span>
                             <span className="font-mono text-sm tabular-nums text-forest-900 shrink-0">
                               {formatSplitTime(s.timeMs)}
@@ -1407,6 +1936,7 @@ export default function SessionWorkspace({
               raceWindow={raceTimeRange}
               resizeToken={`fs-${mapFullscreen}`}
               mapOpacity={map?.opacity ?? 0.55}
+              fillPreview={fillPreview}
             />
             <button
               type="button"

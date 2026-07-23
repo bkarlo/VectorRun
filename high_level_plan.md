@@ -500,7 +500,9 @@ Per-leg corridor, hesitation, peer-anchored decision signals, Overall S→F via 
 
 ### Milestone 1B+ — Training day plan (current)
 
-Ordered **day phases** (transit / rest / course) so one GPX can hold walk-in, several mini-courses (including the same loop twice), rest at base, and walk-back. Setup separates **Controls** from **Define the day**. Race window spans first course S → last course F.
+Ordered **day phases** (transit / rest / course) so one GPX can hold walk-in, several mini-courses (including the same loop twice), rest at base, and walk-back. Setup separates **Controls** from **Define the day**. Race window spans first course S → last course F. Sync is **per course** on real-time windows.
+
+**Forked courses:** a course phase is a `CourseDef` of spine controls and exclusive forks (arms like 1A/1B/1C). GPX matching picks the earliest arm at each fork; splits/replay compare common legs across everyone and forked legs within the same arm. Reserved modes `sequence` / `any_order` (one-man relay / free butterfly) are in the model but not fully shipped in the editor.
 
 ### Milestone 1C — Clustering + AI coach (next)
 
