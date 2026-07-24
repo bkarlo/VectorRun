@@ -100,6 +100,11 @@ function migrate(database: Database.Database) {
       `ALTER TABLE events ADD COLUMN race_window_enabled INTEGER NOT NULL DEFAULT 1`
     );
   }
+  if (!eventCols.has("playback_trail_enabled")) {
+    database.exec(
+      `ALTER TABLE events ADD COLUMN playback_trail_enabled INTEGER NOT NULL DEFAULT 1`
+    );
+  }
 
   const partCols = tableColumns(database, "participants");
   if (!partCols.has("sync_strategy")) {
@@ -156,6 +161,11 @@ function migrate(database: Database.Database) {
   if (userVersion < 13) {
     database.exec(`DELETE FROM analysis_cache`);
     database.pragma("user_version = 13");
+  }
+  if (userVersion < 14) {
+    // Playback trail default is now on
+    database.exec(`UPDATE events SET playback_trail_enabled = 1`);
+    database.pragma("user_version = 14");
   }
 }
 

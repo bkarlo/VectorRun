@@ -14,8 +14,15 @@ import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import type { AffineTransform, ControlRow, TrackPoint } from "@/lib/types";
 import { mapToGps } from "@/lib/georef";
-import { interpolateAtTime } from "@/lib/gpx";
-import { splitTrackByTimeWindow } from "@/lib/sync";
+import { interpolateAtTime, trackUpToTime } from "@/lib/gpx";
+import { findPunchIndex, splitTrackByTimeWindow } from "@/lib/sync";
+import {
+  deadzoneDesiredCenter,
+  expSmooth,
+  leadMeters,
+  leadPoint,
+  panExceedsEpsilon,
+} from "@/lib/followCamera";
 import RotatedImageOverlay from "./RotatedImageOverlay";
 
 function runnerInitials(name: string): string {
@@ -85,6 +92,23 @@ interface Props {
   highlightLeg: { fromSeq: number; toSeq: number } | null;
   /** When set, warm-up/cool-down outside this window are drawn dim. */
   raceWindow?: { min: number; max: number } | null;
+  /**
+   * Only draw each track up to the playhead (trail appears as runners move).
+   * Avatars still show at replayMs.
+   */
+  trailReveal?: boolean;
+  /**
+   * When set, deadzone camera follows this focus (raw runner pose).
+   * Prefer this over focusBounds while following a runner.
+   */
+  followTarget?: {
+    lat: number;
+    lon: number;
+    speedMps?: number;
+    bearing?: number;
+  } | null;
+  /** Playback running — enables ground-speed look-ahead. */
+  followPlaying?: boolean;
   resizeToken?: string | number;
   mapOpacity?: number;
   /** Dashed polyline for planned missing-start fill (control legs → first GPS). */
@@ -108,13 +132,15 @@ function FitBounds({
 
 function FocusBounds({
   bounds,
+  disabled,
 }: {
   bounds: [[number, number], [number, number]] | null | undefined;
+  disabled?: boolean;
 }) {
   const map = useMap();
   const lastKey = useRef<string>("");
   useEffect(() => {
-    if (!bounds) return;
+    if (disabled || !bounds) return;
     const key = bounds.flat().map((n) => n.toFixed(6)).join(",");
     if (key === lastKey.current) return;
     lastKey.current = key;
@@ -124,9 +150,114 @@ function FocusBounds({
       animate: true,
       duration: 0.85,
     });
-  }, [map, bounds]);
+  }, [map, bounds, disabled]);
   return null;
 }
+
+/** Deadzone follow-cam: hold still in-frame; dt-damped pan only at edges. */
+function FollowCamera({
+  focus,
+  active,
+  playing = false,
+}: {
+  focus:
+    | {
+        lat: number;
+        lon: number;
+        speedMps?: number;
+        bearing?: number;
+      }
+    | null
+    | undefined;
+  active: boolean;
+  /** When false (scrub/pause), look-ahead is zero. */
+  playing?: boolean;
+}) {
+  const map = useMap();
+  const smoothed = useRef<{ lat: number; lon: number } | null>(null);
+  const engaged = useRef(false);
+  const raf = useRef<number | null>(null);
+  const lastTs = useRef<number>(0);
+  const latestFocus = useRef(focus);
+  const latestPlaying = useRef(playing);
+
+  latestFocus.current = focus;
+  latestPlaying.current = playing;
+
+  useEffect(() => {
+    if (!active) {
+      smoothed.current = null;
+      engaged.current = false;
+      lastTs.current = 0;
+      if (raf.current != null) cancelAnimationFrame(raf.current);
+      raf.current = null;
+      return;
+    }
+
+    const tick = (now: number) => {
+      const f = latestFocus.current;
+      if (!f || !Number.isFinite(f.lat)) {
+        raf.current = requestAnimationFrame(tick);
+        return;
+      }
+
+      const dt =
+        lastTs.current === 0
+          ? 1 / 60
+          : Math.min(0.1, (now - lastTs.current) / 1000);
+      lastTs.current = now;
+
+      const speed = f.speedMps ?? 0;
+      const bearing = f.bearing ?? 0;
+      const leadM = leadMeters(speed, latestPlaying.current);
+      const focusPt = leadPoint(
+        { lat: f.lat, lon: f.lon, bearing },
+        leadM
+      );
+
+      // One-shot snap on engage: center on runner, lock zoom as-is
+      if (!engaged.current) {
+        map.setView([focusPt.lat, focusPt.lon], map.getZoom(), {
+          animate: false,
+        });
+        smoothed.current = { lat: focusPt.lat, lon: focusPt.lon };
+        engaged.current = true;
+        raf.current = requestAnimationFrame(tick);
+        return;
+      }
+
+      const desired = deadzoneDesiredCenter(map, focusPt, 0.55);
+      if (!desired) {
+        // Inside deadzone — hold camera (no setView → no shake)
+        raf.current = requestAnimationFrame(tick);
+        return;
+      }
+
+      const cur =
+        smoothed.current ??
+        ({ lat: map.getCenter().lat, lon: map.getCenter().lng } as const);
+      const next = expSmooth(cur, desired, dt, 0.32);
+      smoothed.current = next;
+
+      if (panExceedsEpsilon(map, cur, next, 0.5)) {
+        map.setView([next.lat, next.lon], map.getZoom(), { animate: false });
+      }
+
+      raf.current = requestAnimationFrame(tick);
+    };
+
+    raf.current = requestAnimationFrame(tick);
+    return () => {
+      if (raf.current != null) cancelAnimationFrame(raf.current);
+      raf.current = null;
+      lastTs.current = 0;
+    };
+  }, [active, map]);
+
+  return null;
+}
+
+const PUNCH_FX_MS = 2_400;
 
 function InvalidateSize({ token }: { token?: string | number }) {
   const map = useMap();
@@ -159,6 +290,9 @@ export default function SessionMap({
   replayMs,
   highlightLeg,
   raceWindow = null,
+  trailReveal = false,
+  followTarget = null,
+  followPlaying = false,
   resizeToken,
   mapOpacity = 0.55,
   fillPreview = null,
@@ -178,6 +312,58 @@ export default function SessionMap({
   const hasMap = !!(mapUrl && corners);
   const dimRace = !!highlightLeg && legTracks.length > 0;
   const useRaceSplit = !!raceWindow;
+  const following = !!(followTarget && Number.isFinite(followTarget.lat));
+
+  /** Recent control punches for ripple FX (age 0 = just punched). */
+  const punchFx = useMemo(() => {
+    const geo = controls.filter((c) => c.lat != null && c.lon != null);
+    if (geo.length === 0 || tracks.length === 0) return [];
+    const out: {
+      key: string;
+      lat: number;
+      lon: number;
+      color: string;
+      code: string;
+      progress: number;
+    }[] = [];
+
+    for (const t of tracks) {
+      if (t.points.length < 2) continue;
+      let searchFrom = 0;
+      for (const c of geo) {
+        const idx = findPunchIndex(
+          t.points,
+          { lat: c.lat!, lon: c.lon! },
+          searchFrom
+        );
+        if (idx < 0) continue;
+        searchFrom = idx + 1;
+        const punchTime = t.points[idx].time;
+        const age = replayMs - punchTime;
+        if (age < 0 || age > PUNCH_FX_MS) continue;
+        out.push({
+          key: `fx-${t.id}-${c.id}-${punchTime}`,
+          lat: c.lat!,
+          lon: c.lon!,
+          color: t.color,
+          code: c.code,
+          progress: age / PUNCH_FX_MS,
+        });
+      }
+    }
+    return out;
+  }, [tracks, controls, replayMs]);
+
+  const hotControlIds = useMemo(() => {
+    const s = new Set<string>();
+    for (const fx of punchFx) {
+      if (fx.progress < 0.55) {
+        const c = controls.find((x) => x.code === fx.code);
+        if (c) s.add(c.id);
+      }
+    }
+    return s;
+  }, [punchFx, controls]);
 
   return (
     <MapContainer
@@ -195,7 +381,12 @@ export default function SessionMap({
         opacity={hasMap ? 0.4 : 1}
       />
       <FitBounds bounds={bounds} />
-      <FocusBounds bounds={focusBounds} />
+      <FocusBounds bounds={focusBounds} disabled={following} />
+      <FollowCamera
+        focus={followTarget}
+        active={following}
+        playing={followPlaying}
+      />
       <InvalidateSize token={resizeToken} />
 
       {hasMap && mapUrl && corners && (
@@ -210,29 +401,58 @@ export default function SessionMap({
 
       {controls
         .filter((c) => c.lat != null && c.lon != null)
-        .map((c) => (
-          <CircleMarker
-            key={c.id}
-            center={[c.lat!, c.lon!]}
-            radius={10}
-            pathOptions={{
-              color: "#c0392b",
-              fillColor: "#fff",
-              fillOpacity: 0.9,
-              weight: 2,
-            }}
-          >
-            <Tooltip permanent direction="center">
-              {c.code}
-            </Tooltip>
-          </CircleMarker>
-        ))}
+        .map((c) => {
+          const hot = hotControlIds.has(c.id);
+          return (
+            <CircleMarker
+              key={c.id}
+              center={[c.lat!, c.lon!]}
+              radius={hot ? 14 : 10}
+              pathOptions={{
+                color: hot ? "#e11d48" : "#c0392b",
+                fillColor: hot ? "#fecdd3" : "#fff",
+                fillOpacity: hot ? 1 : 0.9,
+                weight: hot ? 3 : 2,
+              }}
+            >
+              <Tooltip permanent direction="center">
+                {c.code}
+              </Tooltip>
+            </CircleMarker>
+          );
+        })}
 
-      {/* Full / race-split tracks (warm-up & cool-down stay dim) */}
+      {/* Expanding rings when a runner punches */}
+      {punchFx.map((fx) => {
+        const ease = 1 - Math.pow(1 - fx.progress, 2);
+        const radius = 10 + ease * 28;
+        const opacity = Math.max(0, 0.85 * (1 - fx.progress));
+        return (
+          <CircleMarker
+            key={fx.key}
+            center={[fx.lat, fx.lon]}
+            radius={radius}
+            pathOptions={{
+              color: fx.color,
+              fillColor: fx.color,
+              fillOpacity: opacity * 0.25,
+              opacity,
+              weight: 2.5,
+            }}
+          />
+        );
+      })}
+      {/* Full tracks — with trail reveal, always keep the entire past path visible
+          even when a leg is highlighted / follow advances to the next leg. */}
       {tracks.map((t) => {
-        if (useRaceSplit && raceWindow) {
+        const source = trailReveal
+          ? trackUpToTime(t.points, replayMs)
+          : t.points;
+        if (source.length < 2) return null;
+
+        if (useRaceSplit && raceWindow && !trailReveal) {
           const { before, during, after } = splitTrackByTimeWindow(
-            t.points,
+            source,
             raceWindow
           );
           const raceOpacity = dimRace ? 0.28 : 0.95;
@@ -270,27 +490,37 @@ export default function SessionMap({
           });
         }
 
-        const latlngs = t.points.map(
+        let drawPts = source;
+        if (useRaceSplit && raceWindow && trailReveal) {
+          drawPts = source.filter(
+            (p) => p.time >= raceWindow.min && p.time <= raceWindow.max
+          );
+          if (drawPts.length < 2) drawPts = source;
+        }
+
+        const latlngs = drawPts.map(
           (p) => [p.lat, p.lon] as [number, number]
         );
+        if (latlngs.length < 2) return null;
         return (
           <Polyline
             key={`full-${t.id}`}
             positions={latlngs}
             pathOptions={{
               color: t.color,
-              weight: dimRace ? 2 : 3,
-              opacity: dimRace ? 0.28 : 1,
+              // Trail reveal: past stays fully visible; without it, dim under leg highlight
+              weight: trailReveal ? 3 : dimRace ? 2 : 3,
+              opacity: trailReveal ? 0.9 : dimRace ? 0.28 : 1,
             }}
           />
         );
       })}
 
-      {/* Active leg corridor */}
+      {/* Current leg emphasis on top (optional corridor) */}
       {legTracks.map((t) => {
-        const latlngs = t.points.map(
-          (p) => [p.lat, p.lon] as [number, number]
-        );
+        const pts = trailReveal ? trackUpToTime(t.points, replayMs) : t.points;
+        if (pts.length < 2) return null;
+        const latlngs = pts.map((p) => [p.lat, p.lon] as [number, number]);
         return (
           <Polyline
             key={`leg-${t.id}`}

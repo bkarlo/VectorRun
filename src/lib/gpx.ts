@@ -155,3 +155,22 @@ export function interpolateAtTime(
     time: t,
   };
 }
+
+/** Points at or before t, ending at the interpolated position at t (for trail reveal). */
+export function trackUpToTime(
+  points: TrackPoint[],
+  t: number
+): TrackPoint[] {
+  if (points.length === 0) return [];
+  if (t < points[0].time) return [];
+  const out: TrackPoint[] = [];
+  for (const p of points) {
+    if (p.time <= t) out.push(p);
+    else break;
+  }
+  const tip = interpolateAtTime(points, t);
+  if (tip && (out.length === 0 || out[out.length - 1].time < t - 0.5)) {
+    out.push(tip);
+  }
+  return out;
+}

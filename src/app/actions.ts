@@ -20,6 +20,7 @@ import {
   setManualDelta,
   setParticipantSyncStrategy,
   setRaceWindowEnabled,
+  setPlaybackTrailEnabled,
   setReferenceParticipant,
   updateEvent,
 } from "@/lib/events";
@@ -78,6 +79,15 @@ export async function actionSaveRaceWindow(
   enabled: boolean
 ) {
   setRaceWindowEnabled(eventId, enabled);
+  revalidatePath(`/events/${eventId}/setup`);
+  revalidatePath(`/events/${eventId}`);
+}
+
+export async function actionSavePlaybackTrail(
+  eventId: string,
+  enabled: boolean
+) {
+  setPlaybackTrailEnabled(eventId, enabled);
   revalidatePath(`/events/${eventId}/setup`);
   revalidatePath(`/events/${eventId}`);
 }

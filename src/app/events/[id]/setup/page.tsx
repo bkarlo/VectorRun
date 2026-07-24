@@ -109,6 +109,7 @@ export default async function SetupPage({
           tracks={tracks}
           initialMapOpacity={map?.opacity ?? 0.55}
           initialRaceWindowEnabled={event.race_window_enabled !== false}
+          initialPlaybackTrailEnabled={event.playback_trail_enabled !== false}
           initialDayPhases={dayPhases.map((p) => ({
             kind: p.kind,
             name: p.name,

@@ -23,6 +23,7 @@ import {
   findPunchIndex,
   legSegmentPoints,
 } from "@/lib/sync";
+import { runnerPose } from "@/lib/followCamera";
 import {
   formatSplitTime,
   formatWallTime,
@@ -583,6 +584,16 @@ export default function SessionWorkspace({
 
   const duration = playbackRange.max - playbackRange.min;
   const relMs = Math.max(0, replayMs - playbackRange.min);
+
+  /** Raw runner pose for deadzone follow cam (look-ahead is inside the map). */
+  const followTarget = useMemo(() => {
+    if (!followRunnerId) return null;
+    const track = syncedTracks.find(
+      (t) => t.participant.id === followRunnerId
+    );
+    if (!track?.syncedPoints.length) return null;
+    return runnerPose(track.syncedPoints, replayMs);
+  }, [followRunnerId, syncedTracks, replayMs]);
 
   // Follow mode: advance leg within the active course phase
   useEffect(() => {
@@ -1462,7 +1473,9 @@ export default function SessionWorkspace({
           <div className="relative flex-1 min-h-[40dvh] lg:min-h-0">
             <SessionMap
               bounds={bounds}
-              focusBounds={legFocusBounds}
+              focusBounds={followRunnerId ? null : legFocusBounds}
+              followTarget={followTarget}
+              followPlaying={playing}
               mapUrl={map ? `/api/maps/${event.id}` : null}
               mapAffine={affine}
               mapWidth={map?.width ?? 0}
@@ -1485,6 +1498,7 @@ export default function SessionWorkspace({
                   : null
               }
               raceWindow={raceTimeRange}
+              trailReveal={event.playback_trail_enabled !== false}
               resizeToken={`${mobileTab}-${mapFullscreen}`}
               mapOpacity={map?.opacity ?? 0.55}
               fillPreview={fillPreview}
@@ -1534,7 +1548,7 @@ export default function SessionWorkspace({
                   onChange={(e) => setFollowRunnerId(e.target.value)}
                   className="rounded-lg border border-forest-200 bg-white px-2 py-1.5 text-sm max-w-[140px]"
                   aria-label="Follow runner"
-                  title="Map gently focuses each leg as this runner punches"
+                  title="Camera smoothly follows this runner"
                 >
                   <option value="">Off</option>
                   {syncedTracks.map((t) => (
@@ -1616,7 +1630,9 @@ export default function SessionWorkspace({
               <div className="relative h-[34dvh] min-h-[180px] max-h-[300px]">
                 <SessionMap
                   bounds={legFocusBounds ?? bounds}
-                  focusBounds={legFocusBounds}
+                  focusBounds={followRunnerId ? null : legFocusBounds}
+                  followTarget={followTarget}
+                  followPlaying={playing}
                   mapUrl={map ? `/api/maps/${event.id}` : null}
                   mapAffine={affine}
                   mapWidth={map?.width ?? 0}
@@ -1642,6 +1658,7 @@ export default function SessionWorkspace({
                       : null
                   }
                   raceWindow={raceTimeRange}
+                  trailReveal={event.playback_trail_enabled !== false}
                   resizeToken={`splits-${mobileTab}-${analysisIndex}`}
                   mapOpacity={map?.opacity ?? 0.55}
                   fillPreview={fillPreview}
@@ -1911,7 +1928,9 @@ export default function SessionWorkspace({
           <div className="relative flex-1 min-h-0">
             <SessionMap
               bounds={bounds}
-              focusBounds={legFocusBounds}
+              focusBounds={followRunnerId ? null : legFocusBounds}
+              followTarget={followTarget}
+              followPlaying={playing}
               mapUrl={map ? `/api/maps/${event.id}` : null}
               mapAffine={affine}
               mapWidth={map?.width ?? 0}
@@ -1934,6 +1953,7 @@ export default function SessionWorkspace({
                   : null
               }
               raceWindow={raceTimeRange}
+              trailReveal={event.playback_trail_enabled !== false}
               resizeToken={`fs-${mapFullscreen}`}
               mapOpacity={map?.opacity ?? 0.55}
               fillPreview={fillPreview}

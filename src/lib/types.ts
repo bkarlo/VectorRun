@@ -89,6 +89,11 @@ export interface EventRow {
   reference_participant_id: string | null;
   /** When true, map timeline scopes to first→last control (default on). */
   race_window_enabled: boolean;
+  /**
+   * When true, map only shows each runner's track up to the playhead
+   * (trail draws as they move). Default on.
+   */
+  playback_trail_enabled: boolean;
   created_at: string;
 }
 

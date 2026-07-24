@@ -35,13 +35,20 @@ function normalizeParticipant(row: ParticipantRow): ParticipantRow {
 }
 
 function normalizeEvent(row: EventRow): EventRow {
+  const raw = row as unknown as {
+    reference_participant_id?: string | null;
+    race_window_enabled?: number | boolean;
+    playback_trail_enabled?: number | boolean;
+  };
   return {
     ...row,
-    reference_participant_id: row.reference_participant_id ?? null,
+    reference_participant_id: raw.reference_participant_id ?? null,
     race_window_enabled:
-      row.race_window_enabled === false ||
-      (row as { race_window_enabled?: number | boolean }).race_window_enabled ===
-        0
+      raw.race_window_enabled === false || raw.race_window_enabled === 0
+        ? false
+        : true,
+    playback_trail_enabled:
+      raw.playback_trail_enabled === false || raw.playback_trail_enabled === 0
         ? false
         : true,
   };
@@ -102,6 +109,13 @@ export function updateEvent(
 export function setRaceWindowEnabled(eventId: string, enabled: boolean) {
   getDb()
     .prepare(`UPDATE events SET race_window_enabled = ? WHERE id = ?`)
+    .run(enabled ? 1 : 0, eventId);
+  return getEvent(eventId)!;
+}
+
+export function setPlaybackTrailEnabled(eventId: string, enabled: boolean) {
+  getDb()
+    .prepare(`UPDATE events SET playback_trail_enabled = ? WHERE id = ?`)
     .run(enabled ? 1 : 0, eventId);
   return getEvent(eventId)!;
 }

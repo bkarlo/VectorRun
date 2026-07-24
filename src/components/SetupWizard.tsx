@@ -17,6 +17,7 @@ import {
   actionSaveDayPlan,
   actionSaveMapOpacity,
   actionSaveRaceWindow,
+  actionSavePlaybackTrail,
 } from "@/app/actions";
 import { fitAffine, gpsToMap } from "@/lib/georef";
 import { trackTouchesControl } from "@/lib/sync";
@@ -52,6 +53,7 @@ interface Props {
   tracks: SetupTrack[];
   initialMapOpacity?: number;
   initialRaceWindowEnabled?: boolean;
+  initialPlaybackTrailEnabled?: boolean;
   initialDayPhases?: {
     kind: DayPhaseKind;
     name: string;
@@ -115,6 +117,10 @@ export default function SetupWizard(props: Props) {
     props.initialRaceWindowEnabled !== false
   );
   const [raceWindowStatus, setRaceWindowStatus] = useState("");
+  const [playbackTrailEnabled, setPlaybackTrailEnabled] = useState(
+    props.initialPlaybackTrailEnabled !== false
+  );
+  const [playbackTrailStatus, setPlaybackTrailStatus] = useState("");
   const [dayPhases, setDayPhases] = useState<DayPhaseDraft[]>(() =>
     props.initialDayPhases?.length
       ? props.initialDayPhases.map(draftFromInitial)
@@ -418,6 +424,38 @@ export default function SetupWizard(props: Props) {
         {raceWindowStatus && (
           <span className="text-xs font-mono text-forest-600">
             {raceWindowStatus}
+          </span>
+        )}
+      </div>
+
+      <div className="panel rounded-xl p-4 flex flex-wrap items-center gap-3">
+        <div className="min-w-0 flex-1">
+          <h3 className="font-display text-base text-forest-900">
+            Draw trail while playing
+          </h3>
+          <p className="text-xs text-forest-600">
+            Hide the full track at the start of replay — only the path behind
+            each runner is shown, so the line appears as they move.
+          </p>
+        </div>
+        <label className="flex items-center gap-2 text-sm text-forest-800 cursor-pointer">
+          <input
+            type="checkbox"
+            className="rounded border-forest-300"
+            checked={playbackTrailEnabled}
+            onChange={(e) => {
+              const next = e.target.checked;
+              setPlaybackTrailEnabled(next);
+              void actionSavePlaybackTrail(props.eventId, next).then(() =>
+                setPlaybackTrailStatus(next ? "On" : "Off")
+              );
+            }}
+          />
+          <span className="font-medium">Enabled</span>
+        </label>
+        {playbackTrailStatus && (
+          <span className="text-xs font-mono text-forest-600">
+            {playbackTrailStatus}
           </span>
         )}
       </div>
