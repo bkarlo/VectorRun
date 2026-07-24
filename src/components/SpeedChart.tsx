@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { TrackPoint } from "@/lib/types";
 import {
   mpsToKmh,
@@ -66,6 +66,39 @@ const STORY_FILL = {
   comeback: "#7c3aed",
   detour: "#6d28d9",
 } as const;
+
+/** EMA readout so sparse GPS doesn't blink the speed chips. */
+function useSmoothedSpeeds(
+  series: { id: string; name: string; color: string; samples: SpeedSample[] }[],
+  replayMs: number
+) {
+  const held = useRef(new Map<string, number>());
+  const [display, setDisplay] = useState<
+    { id: string; name: string; color: string; mps: number }[]
+  >([]);
+
+  useEffect(() => {
+    const next: { id: string; name: string; color: string; mps: number }[] =
+      [];
+    const alpha = 0.22;
+    for (const s of series) {
+      const raw = speedAtTime(s.samples, replayMs);
+      const prev = held.current.get(s.id);
+      let mps: number;
+      if (raw == null) mps = prev ?? 0;
+      else if (prev == null) mps = raw;
+      else mps = prev + (raw - prev) * alpha;
+      held.current.set(s.id, mps);
+      next.push({ id: s.id, name: s.name, color: s.color, mps });
+    }
+    for (const id of [...held.current.keys()]) {
+      if (!series.some((s) => s.id === id)) held.current.delete(id);
+    }
+    setDisplay(next);
+  }, [series, replayMs]);
+
+  return display;
+}
 
 export default function SpeedChart({
   runners,
@@ -163,12 +196,7 @@ export default function SpeedChart({
 
   const playheadX = xScale(Math.min(timeMax, Math.max(timeMin, replayMs)));
 
-  const currentSpeeds = series.map((s) => ({
-    id: s.id,
-    name: s.name,
-    color: s.color,
-    mps: speedAtTime(s.samples, replayMs),
-  }));
+  const currentSpeeds = useSmoothedSpeeds(series, replayMs);
 
   const onPointer = (clientX: number) => {
     const svg = svgRef.current;
@@ -202,7 +230,6 @@ export default function SpeedChart({
         </span>
         <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[10px] font-mono text-forest-600">
           {currentSpeeds.map((s) => {
-            if (s.mps == null) return null;
             const kmh = mpsToKmh(s.mps);
             const pace = mpsToPaceMinPerKm(s.mps);
             return (

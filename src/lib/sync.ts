@@ -69,16 +69,17 @@ export function legSegmentPoints(
 
 /** Soft punch radius when the tight radius never hits. */
 const SOFT_PUNCH_M = 80;
-/** After first entry, snap to closest sample only within this window. */
-const ARRIVE_REFINE_MS = 8_000;
+/** Max dwell considered for an arrive punch (avoids next-course triangle). */
+const ARRIVE_MAX_STAY_MS = 45_000;
+/** Points within this of the closest approach count as "at the control". */
+const NEAR_BEST_M = 3;
 
 export type PunchPrefer = "arrive" | "depart";
 
 /**
  * Punch index for a control.
- * - arrive (default): first entry into radius — finish / intermediate controls.
- *   Does NOT linger for the closest sample over a long base stay (that made →F
- *   close only when the next course started at co-located S/F).
+ * - arrive (default): among the visit, pick the *latest* sample near the
+ *   closest approach to the control (runner has found the flag, about to leave).
  * - depart: leave the control circle — course start after rest at base.
  */
 export function findPunchIndex(
@@ -102,18 +103,56 @@ function findArrivalPunchIndex(
 ): number {
   const entry = firstEnterIndex(points, control, fromIndex, radiusM);
   if (entry >= 0) {
-    return refineClosestInStay(points, control, entry, radiusM, ARRIVE_REFINE_MS);
+    return latestNearClosestInStay(
+      points,
+      control,
+      entry,
+      radiusM,
+      ARRIVE_MAX_STAY_MS
+    );
   }
-  // Soft fallback: first approach within 80m only (not global min over whole track)
   const soft = firstEnterIndex(points, control, fromIndex, SOFT_PUNCH_M);
   if (soft < 0) return -1;
-  return refineClosestInStay(
+  return latestNearClosestInStay(
     points,
     control,
     soft,
     SOFT_PUNCH_M,
-    ARRIVE_REFINE_MS
+    ARRIVE_MAX_STAY_MS
   );
+}
+
+/**
+ * Within one visit: find closest approach, then take the *latest* sample
+ * still very near that closest distance (true punch before heading out).
+ */
+function latestNearClosestInStay(
+  points: TrackPoint[],
+  control: { lat: number; lon: number },
+  entry: number,
+  radiusM: number,
+  maxStayMs: number
+): number {
+  const t0 = points[entry].time;
+  let end = entry;
+  for (let i = entry; i < points.length; i++) {
+    if (points[i].time - t0 > maxStayMs) break;
+    if (haversineM(points[i], control) > radiusM) break;
+    end = i;
+  }
+
+  let bestDist = Infinity;
+  for (let i = entry; i <= end; i++) {
+    const d = haversineM(points[i], control);
+    if (d < bestDist) bestDist = d;
+  }
+  const thresh = Math.max(bestDist + NEAR_BEST_M, bestDist * 1.2);
+
+  let latest = entry;
+  for (let i = entry; i <= end; i++) {
+    if (haversineM(points[i], control) <= thresh) latest = i;
+  }
+  return latest;
 }
 
 function findDeparturePunchIndex(
@@ -164,29 +203,6 @@ function lastInRadius(
     else break;
   }
   return last;
-}
-
-/** Closest sample in the stay, but only shortly after first entry. */
-function refineClosestInStay(
-  points: TrackPoint[],
-  control: { lat: number; lon: number },
-  entry: number,
-  radiusM: number,
-  refineMs: number
-): number {
-  let best = entry;
-  let bestDist = haversineM(points[entry], control);
-  const t0 = points[entry].time;
-  for (let i = entry + 1; i < points.length; i++) {
-    if (points[i].time - t0 > refineMs) break;
-    const d = haversineM(points[i], control);
-    if (d > radiusM) break;
-    if (d < bestDist) {
-      best = i;
-      bestDist = d;
-    }
-  }
-  return best;
 }
 
 /** Whether a track comes within punch radius of a control (any point). */

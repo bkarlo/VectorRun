@@ -7,7 +7,9 @@ export interface SpeedSample {
 }
 
 /** Don't linearly blend speed across gaps longer than this. */
-const MAX_INTERP_MS = 4_000;
+const MAX_INTERP_MS = 6_000;
+/** Half-window for time-based moving average on the profile. */
+const SMOOTH_HALF_MS = 5_000;
 
 /**
  * Instantaneous speed samples from consecutive GPS points.
@@ -16,10 +18,11 @@ const MAX_INTERP_MS = 4_000;
  */
 export function speedProfile(
   points: TrackPoint[],
-  opts?: { maxSpeedMps?: number; maxGapMs?: number }
+  opts?: { maxSpeedMps?: number; maxGapMs?: number; smoothHalfMs?: number }
 ): SpeedSample[] {
   const maxSpeed = opts?.maxSpeedMps ?? 8; // ~28.8 km/h
   const maxGap = opts?.maxGapMs ?? 15_000;
+  const smoothHalf = opts?.smoothHalfMs ?? SMOOTH_HALF_MS;
   const out: SpeedSample[] = [];
 
   for (let i = 1; i < points.length; i++) {
@@ -41,26 +44,50 @@ export function speedProfile(
     out.push({ time: points[i].time, speedMps: speed });
   }
 
-  return smoothSpeed(out, 5);
+  return smoothSpeedByTime(out, smoothHalf);
 }
 
-/** Simple moving-average smooth (odd window); ignores neighbors far in time. */
-function smoothSpeed(samples: SpeedSample[], window: number): SpeedSample[] {
-  if (samples.length === 0 || window < 3) return samples;
-  const half = Math.floor(window / 2);
-  return samples.map((s, i) => {
-    let sum = 0;
-    let n = 0;
-    for (let j = i - half; j <= i + half; j++) {
-      if (j < 0 || j >= samples.length) continue;
-      if (Math.abs(samples[j].time - s.time) > MAX_INTERP_MS) continue;
-      sum += samples[j].speedMps;
-      n += 1;
+/**
+ * Time-windowed moving average: each sample is averaged with neighbors
+ * within ±halfWindowMs (ignores distant GPS holes).
+ */
+function smoothSpeedByTime(
+  samples: SpeedSample[],
+  halfWindowMs: number
+): SpeedSample[] {
+  if (samples.length === 0 || halfWindowMs <= 0) return samples;
+  const n = samples.length;
+  const out: SpeedSample[] = new Array(n);
+
+  let lo = 0;
+  let hi = 0;
+  let sum = 0;
+  let count = 0;
+
+  for (let i = 0; i < n; i++) {
+    const t = samples[i].time;
+    while (hi < n && samples[hi].time <= t + halfWindowMs) {
+      sum += samples[hi].speedMps;
+      count += 1;
+      hi += 1;
     }
-    return { time: s.time, speedMps: n ? sum / n : s.speedMps };
-  });
+    while (lo < hi && samples[lo].time < t - halfWindowMs) {
+      sum -= samples[lo].speedMps;
+      count -= 1;
+      lo += 1;
+    }
+    out[i] = {
+      time: t,
+      speedMps: count > 0 ? sum / count : samples[i].speedMps,
+    };
+  }
+  return out;
 }
 
+/**
+ * Interpolated speed at time t. Across short gaps, blends; across longer
+ * holes, holds the nearer sample (avoids blinking 0 / null in the UI).
+ */
 export function speedAtTime(
   samples: SpeedSample[],
   t: number
@@ -81,11 +108,9 @@ export function speedAtTime(
   const b = samples[hi];
   const span = b.time - a.time || 1;
 
-  // Across a long hole between samples, don't fake a glide of the previous pace
   if (span > MAX_INTERP_MS) {
-    if (t - a.time <= MAX_INTERP_MS / 2) return a.speedMps;
-    if (b.time - t <= MAX_INTERP_MS / 2) return b.speedMps;
-    return 0;
+    // Hold nearer endpoint instead of dropping to 0 (less indicator flash)
+    return t - a.time <= b.time - t ? a.speedMps : b.speedMps;
   }
 
   const u = (t - a.time) / span;

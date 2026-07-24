@@ -1,4 +1,4 @@
-import type L from "leaflet";
+import type { Map as LeafletMap } from "leaflet";
 import { haversineM, interpolateAtTime } from "./gpx";
 import type { TrackPoint } from "./types";
 
@@ -34,6 +34,61 @@ export function runnerPose(
   return { lat: pos.lat, lon: pos.lon, speedMps, bearing };
 }
 
+/** Pose at replay time only if t is inside the track's time span (no clamp). */
+export function positionInTrackRange(
+  points: TrackPoint[],
+  replayMs: number
+): { lat: number; lon: number } | null {
+  if (points.length === 0) return null;
+  if (replayMs < points[0].time || replayMs > points[points.length - 1].time) {
+    return null;
+  }
+  const pos = interpolateAtTime(points, replayMs);
+  if (!pos) return null;
+  return { lat: pos.lat, lon: pos.lon };
+}
+
+/** Centroid + mean motion of several runners (peloton follow). */
+export function pelotonPose(
+  tracks: TrackPoint[][],
+  replayMs: number
+): RunnerPose | null {
+  const poses: RunnerPose[] = [];
+  for (const pts of tracks) {
+    if (
+      pts.length === 0 ||
+      replayMs < pts[0].time ||
+      replayMs > pts[pts.length - 1].time
+    ) {
+      continue;
+    }
+    const p = runnerPose(pts, replayMs);
+    if (p) poses.push(p);
+  }
+  if (poses.length === 0) return null;
+  if (poses.length === 1) return poses[0];
+
+  let lat = 0;
+  let lon = 0;
+  let speed = 0;
+  let sinB = 0;
+  let cosB = 0;
+  for (const p of poses) {
+    lat += p.lat;
+    lon += p.lon;
+    speed += p.speedMps;
+    sinB += Math.sin(p.bearing);
+    cosB += Math.cos(p.bearing);
+  }
+  const n = poses.length;
+  return {
+    lat: lat / n,
+    lon: lon / n,
+    speedMps: speed / n,
+    bearing: Math.atan2(sinB, cosB),
+  };
+}
+
 /** Lead point along bearing by leadM meters. */
 export function leadPoint(
   pose: { lat: number; lon: number; bearing: number },
@@ -62,23 +117,69 @@ export function leadMeters(speedMps: number, playing: boolean): number {
   return Math.min(40, Math.max(0, speedMps * 2.5));
 }
 
+export type DeadzoneOpts = {
+  /** Fraction of map size for the comfort box (default 0.55). */
+  deadzoneFrac?: number;
+  /** Travel bearing (rad from north). When set with enough speed, bias framing forward. */
+  bearing?: number;
+  speedMps?: number;
+  /**
+   * Place the comfort box so the runner sits ~1/3 from the rear of the
+   * frame along travel (2/3 of the view looks forward). Soft — still a deadzone.
+   */
+  preferForward?: boolean;
+};
+
 /**
- * If focus is outside the center deadzone, return the map center that
+ * If focus is outside the comfort deadzone, return the map center that
  * pulls focus just inside the box (minimum pan). Null = already framed.
  */
 export function deadzoneDesiredCenter(
-  map: L.Map,
+  map: LeafletMap,
   focus: { lat: number; lon: number },
-  deadzoneFrac = 0.55
+  opts: DeadzoneOpts | number = 0.55
 ): { lat: number; lon: number } | null {
+  const o: DeadzoneOpts =
+    typeof opts === "number" ? { deadzoneFrac: opts } : opts;
+  const deadzoneFrac = o.deadzoneFrac ?? 0.55;
+
   const size = map.getSize();
   if (size.x < 40 || size.y < 40) return null;
 
   const pt = map.latLngToContainerPoint([focus.lat, focus.lon]);
   const halfW = (size.x * deadzoneFrac) / 2;
   const halfH = (size.y * deadzoneFrac) / 2;
-  const cx = size.x / 2;
-  const cy = size.y / 2;
+
+  // Default: box centered on map. With travel direction: shift box so ideal
+  // runner position is ~1/3 from the back of the frame (more map ahead).
+  let cx = size.x / 2;
+  let cy = size.y / 2;
+  if (
+    o.preferForward !== false &&
+    o.bearing != null &&
+    (o.speedMps ?? 0) >= 0.4
+  ) {
+    const ahead = leadPoint(
+      { lat: focus.lat, lon: focus.lon, bearing: o.bearing },
+      40
+    );
+    const p1 = map.latLngToContainerPoint([ahead.lat, ahead.lon]);
+    let fx = p1.x - pt.x;
+    let fy = p1.y - pt.y;
+    const len = Math.hypot(fx, fy);
+    if (len > 1e-3) {
+      fx /= len;
+      fy /= len;
+      // Ideal runner pixel: center shifted *against* forward (toward rear)
+      // by ~16% of min dimension → roughly first third along travel axis.
+      const shift = Math.min(size.x, size.y) * 0.16;
+      const idealX = size.x / 2 - fx * shift;
+      const idealY = size.y / 2 - fy * shift;
+      // Comfort box centered on that ideal (not map center)
+      cx = idealX;
+      cy = idealY;
+    }
+  }
 
   const left = cx - halfW;
   const right = cx + halfW;
@@ -94,17 +195,46 @@ export function deadzoneDesiredCenter(
 
   if (dx === 0 && dy === 0) return null;
 
-  // Pan map so focus moves by (-dx, -dy) in container space
   const center = map.getCenter();
   const centerPt = map.latLngToContainerPoint(center);
-  const desiredPt = LPoint(centerPt.x + dx, centerPt.y + dy);
-  const desired = map.containerPointToLatLng(desiredPt);
+  const desired = map.containerPointToLatLng([
+    centerPt.x + dx,
+    centerPt.y + dy,
+  ]);
   return { lat: desired.lat, lon: desired.lng };
 }
 
-function LPoint(x: number, y: number): L.Point {
-  // Avoid importing Point constructor issues — use map's point via leaflet global shape
-  return { x, y } as L.Point;
+/** Map center that places focus at the forward-biased ideal (engage snap). */
+export function forwardBiasSnapCenter(
+  map: LeafletMap,
+  focus: { lat: number; lon: number },
+  bearing: number,
+  speedMps: number
+): { lat: number; lon: number } {
+  if (speedMps < 0.4) return focus;
+  const size = map.getSize();
+  const pt = map.latLngToContainerPoint([focus.lat, focus.lon]);
+  const ahead = leadPoint({ ...focus, bearing }, 40);
+  const p1 = map.latLngToContainerPoint([ahead.lat, ahead.lon]);
+  let fx = p1.x - pt.x;
+  let fy = p1.y - pt.y;
+  const len = Math.hypot(fx, fy);
+  if (len < 1e-3) return focus;
+  fx /= len;
+  fy /= len;
+  const shift = Math.min(size.x, size.y) * 0.16;
+  // Want focus at (cx - fx*shift, cy - fy*shift). Pan so current focus moves there.
+  const idealX = size.x / 2 - fx * shift;
+  const idealY = size.y / 2 - fy * shift;
+  const dx = pt.x - idealX;
+  const dy = pt.y - idealY;
+  const center = map.getCenter();
+  const centerPt = map.latLngToContainerPoint(center);
+  const desired = map.containerPointToLatLng([
+    centerPt.x + dx,
+    centerPt.y + dy,
+  ]);
+  return { lat: desired.lat, lon: desired.lng };
 }
 
 /** Exponential ease toward desired; tauSeconds is time to ~63% of the gap. */
@@ -124,7 +254,7 @@ export function expSmooth(
 
 /** True if pan is large enough to bother Leaflet (~0.5 px). */
 export function panExceedsEpsilon(
-  map: L.Map,
+  map: LeafletMap,
   from: { lat: number; lon: number },
   to: { lat: number; lon: number },
   epsilonPx = 0.5

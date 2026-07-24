@@ -167,6 +167,11 @@ function migrate(database: Database.Database) {
     database.exec(`UPDATE events SET playback_trail_enabled = 1`);
     database.pragma("user_version = 14");
   }
+  if (userVersion < 15) {
+    // Arrive punch = latest near-closest (analysis times change)
+    database.exec(`DELETE FROM analysis_cache`);
+    database.pragma("user_version = 15");
+  }
 }
 
 export function getUploadsDir() {

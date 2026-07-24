@@ -39,6 +39,12 @@ body {
   border: none !important;
 }
 
+/* Orienteering control symbols (circle + code) */
+.o-control-symbol {
+  background: transparent !important;
+  border: none !important;
+}
+
 /* Leaflet overrides inside our workspace */
 .leaflet-container {
   background: #e3ebe0;

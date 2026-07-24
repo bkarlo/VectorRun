@@ -496,12 +496,14 @@ export function formatDelta(ms: number): string {
 export function formatWallTime(ms: number | null): string {
   if (ms == null || !Number.isFinite(ms)) return "—";
   try {
-    return new Date(ms).toLocaleString(undefined, {
+    // Fixed locale so SSR HTML matches the client (avoid hydration mismatch).
+    return new Date(ms).toLocaleString("en-GB", {
       month: "short",
       day: "numeric",
       hour: "2-digit",
       minute: "2-digit",
       second: "2-digit",
+      hour12: false,
     });
   } catch {
     return "—";

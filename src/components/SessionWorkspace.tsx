@@ -23,7 +23,7 @@ import {
   findPunchIndex,
   legSegmentPoints,
 } from "@/lib/sync";
-import { runnerPose } from "@/lib/followCamera";
+import { pelotonPose, runnerPose } from "@/lib/followCamera";
 import {
   formatSplitTime,
   formatWallTime,
@@ -585,15 +585,27 @@ export default function SessionWorkspace({
   const duration = playbackRange.max - playbackRange.min;
   const relMs = Math.max(0, replayMs - playbackRange.min);
 
-  /** Raw runner pose for deadzone follow cam (look-ahead is inside the map). */
+  /**
+   * Follow target: selected runner always; peloton centroid only while playing
+   * (paused All leaves course/leg FocusBounds alone).
+   */
   const followTarget = useMemo(() => {
-    if (!followRunnerId) return null;
-    const track = syncedTracks.find(
-      (t) => t.participant.id === followRunnerId
-    );
-    if (!track?.syncedPoints.length) return null;
-    return runnerPose(track.syncedPoints, replayMs);
-  }, [followRunnerId, syncedTracks, replayMs]);
+    if (followRunnerId) {
+      const track = syncedTracks.find(
+        (t) => t.participant.id === followRunnerId
+      );
+      if (!track?.syncedPoints.length) return null;
+      return runnerPose(track.syncedPoints, replayMs);
+    }
+    if (!playing) return null;
+    const tracks = syncedTracks
+      .filter((t) => selected[t.participant.id] && t.syncedPoints.length > 0)
+      .map((t) => t.syncedPoints);
+    if (tracks.length === 0) return null;
+    return pelotonPose(tracks, replayMs);
+  }, [followRunnerId, syncedTracks, replayMs, selected, playing]);
+
+  const followPack = !followRunnerId && playing && !!followTarget;
 
   // Follow mode: advance leg within the active course phase
   useEffect(() => {
@@ -674,8 +686,8 @@ export default function SessionWorkspace({
     activeCourse,
   ]);
 
-  const storyMarkers = useMemo(() => {
-    if (!currentView) return [];
+  /** All-leg story marks (hesitation / come-back / detour); not leg-scoped. */
+  const allStoryMarkers = useMemo(() => {
     const marks: {
       key: string;
       lat: number;
@@ -686,58 +698,106 @@ export default function SessionWorkspace({
       atMs?: number;
     }[] = [];
 
+    // All legs so marks persist when switching; skip overall (would duplicate).
+    const sources =
+      activeLegs.length > 0
+        ? activeLegs
+        : activeCourse?.overall
+          ? [activeCourse.overall]
+          : [];
+
+    for (const view of sources) {
+      for (const s of view.splits) {
+        if (!selected[s.participantId]) continue;
+        for (const h of s.hesitations ?? []) {
+          marks.push({
+            key: `h-${s.participantId}-${h.startMs}`,
+            lat: h.lat,
+            lon: h.lon,
+            kind: "hesitation",
+            label: `${s.participantName}: hesitation ${Math.round(h.durationMs / 1000)}s`,
+            color: s.color,
+            atMs: h.startMs,
+          });
+        }
+        if (isNotableComeBack(s.comeBack) && s.comeBack) {
+          marks.push({
+            key: `cb-${s.participantId}-${s.comeBack.atMs}`,
+            lat: s.comeBack.lat,
+            lon: s.comeBack.lon,
+            kind: "comeback",
+            label: `${s.participantName}: come-back ~${s.comeBack.extraM}m`,
+            color: s.color,
+            atMs: s.comeBack.atMs,
+          });
+        }
+        for (const d of s.detours ?? []) {
+          marks.push({
+            key: `d-${s.participantId}-${d.startMs}`,
+            lat: d.lat,
+            lon: d.lon,
+            kind: "detour",
+            label: `${s.participantName}: detour ${d.maxDeviationM}m off best`,
+            color: s.color,
+            atMs: d.startMs,
+          });
+        }
+      }
+    }
+    return marks;
+  }, [activeCourse?.overall, activeLegs, selected]);
+
+  /** Map: only events at or before the playhead (like the drawn trail). */
+  const storyMarkers = useMemo(
+    () =>
+      allStoryMarkers.filter(
+        (m) => m.atMs == null || m.atMs <= replayMs
+      ),
+    [allStoryMarkers, replayMs]
+  );
+
+  /** Speed chart: current-leg marks on the time axis (full leg, including ahead). */
+  const speedStoryMarks = useMemo(() => {
+    if (!currentView) return [];
+    const marks: {
+      key: string;
+      timeMs: number;
+      kind: "hesitation" | "comeback" | "detour";
+      label: string;
+      color: string;
+    }[] = [];
     for (const s of currentView.splits) {
       if (!selected[s.participantId]) continue;
       for (const h of s.hesitations ?? []) {
         marks.push({
           key: `h-${s.participantId}-${h.startMs}`,
-          lat: h.lat,
-          lon: h.lon,
+          timeMs: h.startMs,
           kind: "hesitation",
           label: `${s.participantName}: hesitation ${Math.round(h.durationMs / 1000)}s`,
           color: s.color,
-          atMs: h.startMs,
         });
       }
       if (isNotableComeBack(s.comeBack) && s.comeBack) {
         marks.push({
           key: `cb-${s.participantId}-${s.comeBack.atMs}`,
-          lat: s.comeBack.lat,
-          lon: s.comeBack.lon,
+          timeMs: s.comeBack.atMs,
           kind: "comeback",
           label: `${s.participantName}: come-back ~${s.comeBack.extraM}m`,
           color: s.color,
-          atMs: s.comeBack.atMs,
         });
       }
       for (const d of s.detours ?? []) {
         marks.push({
           key: `d-${s.participantId}-${d.startMs}`,
-          lat: d.lat,
-          lon: d.lon,
+          timeMs: d.startMs,
           kind: "detour",
           label: `${s.participantName}: detour ${d.maxDeviationM}m off best`,
           color: s.color,
-          atMs: d.startMs,
         });
       }
     }
     return marks;
   }, [currentView, selected]);
-
-  const speedStoryMarks = useMemo(
-    () =>
-      storyMarkers
-        .filter((m) => m.atMs != null)
-        .map((m) => ({
-          key: m.key,
-          timeMs: m.atMs!,
-          kind: m.kind,
-          label: m.label,
-          color: m.color,
-        })),
-    [storyMarkers]
-  );
 
   const legFocusBounds = useMemo(() => {
     const pts: { lat: number; lon: number }[] = [];
@@ -1473,8 +1533,9 @@ export default function SessionWorkspace({
           <div className="relative flex-1 min-h-[40dvh] lg:min-h-0">
             <SessionMap
               bounds={bounds}
-              focusBounds={followRunnerId ? null : legFocusBounds}
+              focusBounds={followTarget ? null : legFocusBounds}
               followTarget={followTarget}
+              followPack={followPack}
               followPlaying={playing}
               mapUrl={map ? `/api/maps/${event.id}` : null}
               mapAffine={affine}
@@ -1548,9 +1609,9 @@ export default function SessionWorkspace({
                   onChange={(e) => setFollowRunnerId(e.target.value)}
                   className="rounded-lg border border-forest-200 bg-white px-2 py-1.5 text-sm max-w-[140px]"
                   aria-label="Follow runner"
-                  title="Camera smoothly follows this runner"
+                  title="Follow one runner, or All for the peloton"
                 >
-                  <option value="">Off</option>
+                  <option value="">All</option>
                   {syncedTracks.map((t) => (
                     <option key={t.participant.id} value={t.participant.id}>
                       {t.participant.name}
@@ -1630,8 +1691,9 @@ export default function SessionWorkspace({
               <div className="relative h-[34dvh] min-h-[180px] max-h-[300px]">
                 <SessionMap
                   bounds={legFocusBounds ?? bounds}
-                  focusBounds={followRunnerId ? null : legFocusBounds}
+                  focusBounds={followTarget ? null : legFocusBounds}
                   followTarget={followTarget}
+                  followPack={followPack}
                   followPlaying={playing}
                   mapUrl={map ? `/api/maps/${event.id}` : null}
                   mapAffine={affine}
@@ -1928,8 +1990,9 @@ export default function SessionWorkspace({
           <div className="relative flex-1 min-h-0">
             <SessionMap
               bounds={bounds}
-              focusBounds={followRunnerId ? null : legFocusBounds}
+              focusBounds={followTarget ? null : legFocusBounds}
               followTarget={followTarget}
+              followPack={followPack}
               followPlaying={playing}
               mapUrl={map ? `/api/maps/${event.id}` : null}
               mapAffine={affine}
@@ -1993,7 +2056,7 @@ export default function SessionWorkspace({
                 className="rounded-lg border border-forest-200 bg-white px-2 py-2 text-sm max-w-[140px]"
                 aria-label="Follow runner"
               >
-                <option value="">Follow: Off</option>
+                <option value="">Follow: All</option>
                 {syncedTracks.map((t) => (
                   <option key={t.participant.id} value={t.participant.id}>
                     {t.participant.name}

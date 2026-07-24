@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   CircleMarker,
   MapContainer,
@@ -9,6 +9,7 @@ import {
   TileLayer,
   Tooltip,
   useMap,
+  useMapEvents,
 } from "react-leaflet";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
@@ -19,11 +20,199 @@ import { findPunchIndex, splitTrackByTimeWindow } from "@/lib/sync";
 import {
   deadzoneDesiredCenter,
   expSmooth,
+  forwardBiasSnapCenter,
   leadMeters,
   leadPoint,
   panExceedsEpsilon,
 } from "@/lib/followCamera";
 import RotatedImageOverlay from "./RotatedImageOverlay";
+
+/** ~5–6 mm on a 1:10k map ≈ 50–60 m on the ground (scaled −30%). */
+const CONTROL_RADIUS_M = 31.5;
+const CONTROL_COLOR = "#AB5DD9";
+const CONTROL_HOT = "#c084fc";
+
+function metersPerPixel(lat: number, zoom: number): number {
+  return (
+    (40075016.686 * Math.abs(Math.cos((lat * Math.PI) / 180))) /
+    Math.pow(2, zoom + 8)
+  );
+}
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+/** Orienteering-style control: circle + code beside it; size tracks map scale. */
+function controlSymbolIcon(
+  code: string,
+  radiusPx: number,
+  hot: boolean
+): L.DivIcon {
+  const r = Math.max(3, radiusPx);
+  const stroke = Math.max(1.25, Math.min(3.2, r * 0.16));
+  const font = Math.max(8, Math.min(17, r * 0.9));
+  const gap = Math.max(3, r * 0.22);
+  const labelW = Math.ceil(font * Math.max(1.1, code.length * 0.62));
+  const w = Math.ceil(r * 2 + gap + labelW + 6);
+  const h = Math.ceil(Math.max(r * 2, font * 1.35) + 4);
+  const cx = r + stroke;
+  const cy = h / 2;
+  const ring = hot ? CONTROL_HOT : CONTROL_COLOR;
+  const fill = hot ? "rgba(192, 132, 252, 0.45)" : "rgba(255,255,255,0.12)";
+  const label = escapeHtml(code);
+
+  return L.divIcon({
+    className: "o-control-symbol",
+    iconSize: [w, h],
+    iconAnchor: [cx, cy],
+    html: `<div style="position:relative;width:${w}px;height:${h}px;pointer-events:none">
+      <div style="
+        position:absolute;left:${cx - r}px;top:${cy - r}px;
+        width:${r * 2}px;height:${r * 2}px;border-radius:50%;
+        border:${stroke}px solid ${ring};
+        background:${fill};
+        box-sizing:border-box;
+      "></div>
+      <div style="
+        position:absolute;left:${cx + r + gap}px;top:50%;
+        transform:translateY(-50%);
+        font:${hot ? 700 : 600} ${font}px/1.1 ui-sans-serif, system-ui, sans-serif;
+        color:${ring};
+        text-shadow:
+          0 0 2px #fff,
+          0 0 3px #fff,
+          1px 0 0 #fff,
+          -1px 0 0 #fff,
+          0 1px 0 #fff,
+          0 -1px 0 #fff;
+        white-space:nowrap;
+        letter-spacing:-0.02em;
+      ">${label}</div>
+    </div>`,
+  });
+}
+
+function useMapZoom(): number {
+  const map = useMap();
+  const [zoom, setZoom] = useState(() => map.getZoom());
+  useMapEvents({
+    zoom() {
+      setZoom(map.getZoom());
+    },
+    zoomend() {
+      setZoom(map.getZoom());
+    },
+  });
+  return zoom;
+}
+
+function ControlSymbols({
+  controls,
+  hotIds,
+}: {
+  controls: ControlRow[];
+  hotIds: Set<string>;
+}) {
+  const map = useMap();
+  const zoom = useMapZoom();
+  const [paneReady, setPaneReady] = useState(
+    () => !!map.getPane("controlSymbolPane")
+  );
+
+  useLayoutEffect(() => {
+    if (!map.getPane("controlSymbolPane")) {
+      map.createPane("controlSymbolPane");
+    }
+    const pane = map.getPane("controlSymbolPane");
+    if (pane) {
+      // Above tracks (overlay 400), below runner avatars (marker 600)
+      pane.style.zIndex = "450";
+      pane.style.pointerEvents = "none";
+    }
+    setPaneReady(true);
+  }, [map]);
+
+  if (!paneReady) return null;
+
+  return (
+    <>
+      {controls
+        .filter((c) => c.lat != null && c.lon != null)
+        .map((c) => {
+          const mpp = metersPerPixel(c.lat!, zoom);
+          // Soft min so symbols stay readable when fully zoomed out
+          const radiusPx = Math.max(
+            3.5,
+            CONTROL_RADIUS_M / Math.max(mpp, 1e-6)
+          );
+          const icon = controlSymbolIcon(
+            c.code,
+            radiusPx,
+            hotIds.has(c.id)
+          );
+          return (
+            <Marker
+              key={c.id}
+              position={[c.lat!, c.lon!]}
+              icon={icon}
+              pane="controlSymbolPane"
+              interactive={false}
+              keyboard={false}
+            />
+          );
+        })}
+    </>
+  );
+}
+
+/** Expanding punch ring scaled like the control circle. */
+function PunchRipples({
+  items,
+}: {
+  items: {
+    key: string;
+    lat: number;
+    lon: number;
+    color: string;
+    progress: number;
+  }[];
+}) {
+  const zoom = useMapZoom();
+
+  return (
+    <>
+      {items.map((fx) => {
+        const ease = 1 - Math.pow(1 - fx.progress, 2);
+        const mpp = metersPerPixel(fx.lat, zoom);
+        const baseR = Math.max(
+          3.5,
+          CONTROL_RADIUS_M / Math.max(mpp, 1e-6)
+        );
+        const radius = baseR + ease * baseR * 2.4;
+        const opacity = Math.max(0, 0.85 * (1 - fx.progress));
+        return (
+          <CircleMarker
+            key={fx.key}
+            center={[fx.lat, fx.lon]}
+            radius={radius}
+            pathOptions={{
+              color: fx.color,
+              fillColor: fx.color,
+              fillOpacity: opacity * 0.25,
+              opacity,
+              weight: Math.max(1.5, Math.min(3, baseR * 0.12)),
+            }}
+          />
+        );
+      })}
+    </>
+  );
+}
 
 function runnerInitials(name: string): string {
   const parts = name.trim().split(/\s+/).filter(Boolean);
@@ -98,8 +287,8 @@ interface Props {
    */
   trailReveal?: boolean;
   /**
-   * When set, deadzone camera follows this focus (raw runner pose).
-   * Prefer this over focusBounds while following a runner.
+   * When set, deadzone camera follows this focus (raw runner / peloton pose).
+   * Prefer this over focusBounds while following.
    */
   followTarget?: {
     lat: number;
@@ -107,6 +296,8 @@ interface Props {
     speedMps?: number;
     bearing?: number;
   } | null;
+  /** True when following the pack centroid (All) — looser deadzone. */
+  followPack?: boolean;
   /** Playback running — enables ground-speed look-ahead. */
   followPlaying?: boolean;
   resizeToken?: string | number;
@@ -154,11 +345,14 @@ function FocusBounds({
   return null;
 }
 
-/** Deadzone follow-cam: hold still in-frame; dt-damped pan only at edges. */
+/** Deadzone follow-cam: hold still in-frame; dt-damped pan only at edges.
+ *  Pack mode uses the same logic on the peloton centroid (looser deadzone).
+ */
 function FollowCamera({
   focus,
   active,
   playing = false,
+  pack = false,
 }: {
   focus:
     | {
@@ -172,6 +366,8 @@ function FollowCamera({
   active: boolean;
   /** When false (scrub/pause), look-ahead is zero. */
   playing?: boolean;
+  /** Follow pack centroid with a slightly larger comfort box. */
+  pack?: boolean;
 }) {
   const map = useMap();
   const smoothed = useRef<{ lat: number; lon: number } | null>(null);
@@ -180,19 +376,55 @@ function FollowCamera({
   const lastTs = useRef<number>(0);
   const latestFocus = useRef(focus);
   const latestPlaying = useRef(playing);
+  const latestPack = useRef(pack);
+  /** Rising edge of follow+play → re-snap and nudge zoom in. */
+  const followPlayLatched = useRef(false);
+  const bumpZoomOnEngage = useRef(false);
+  const zoomAnimating = useRef(false);
 
   latestFocus.current = focus;
   latestPlaying.current = playing;
+  latestPack.current = pack;
+
+  // On Play (while following), zoom in a notch so the deadzone cam feels right
+  useEffect(() => {
+    if (active && playing) {
+      if (!followPlayLatched.current) {
+        followPlayLatched.current = true;
+        engaged.current = false;
+        bumpZoomOnEngage.current = true;
+      }
+    } else {
+      followPlayLatched.current = false;
+    }
+  }, [active, playing]);
+
+  // Pack ↔ single: re-snap with the right framing
+  const prevPack = useRef(pack);
+  useEffect(() => {
+    if (prevPack.current === pack) return;
+    prevPack.current = pack;
+    if (!active) return;
+    engaged.current = false;
+    bumpZoomOnEngage.current = playing;
+  }, [pack, active, playing]);
 
   useEffect(() => {
     if (!active) {
       smoothed.current = null;
       engaged.current = false;
       lastTs.current = 0;
+      bumpZoomOnEngage.current = false;
+      zoomAnimating.current = false;
       if (raf.current != null) cancelAnimationFrame(raf.current);
       raf.current = null;
       return;
     }
+
+    const onZoomEnd = () => {
+      zoomAnimating.current = false;
+    };
+    map.on("zoomend", onZoomEnd);
 
     const tick = (now: number) => {
       const f = latestFocus.current;
@@ -207,6 +439,7 @@ function FollowCamera({
           : Math.min(0.1, (now - lastTs.current) / 1000);
       lastTs.current = now;
 
+      const isPack = latestPack.current;
       const speed = f.speedMps ?? 0;
       const bearing = f.bearing ?? 0;
       const leadM = leadMeters(speed, latestPlaying.current);
@@ -214,21 +447,47 @@ function FollowCamera({
         { lat: f.lat, lon: f.lon, bearing },
         leadM
       );
+      const deadzoneOpts = {
+        // Pack: larger comfort box so the group breathes without constant pan
+        deadzoneFrac: isPack ? 0.68 : 0.55,
+        bearing,
+        speedMps: speed,
+        preferForward: true,
+      };
 
-      // One-shot snap on engage: center on runner, lock zoom as-is
+      // One-shot snap on engage: runner/pack toward rear third, look ahead
       if (!engaged.current) {
-        map.setView([focusPt.lat, focusPt.lon], map.getZoom(), {
-          animate: false,
+        const snap = forwardBiasSnapCenter(map, focusPt, bearing, speed);
+        const fromZoom = map.getZoom();
+        let zoom = fromZoom;
+        if (bumpZoomOnEngage.current) {
+          bumpZoomOnEngage.current = false;
+          // Pack a bit wider than solo so more of the group is visible
+          const COMFORT = isPack ? 15.5 : 16.5;
+          if (zoom < COMFORT - 0.05) {
+            zoom = Math.min(COMFORT, zoom + 1.35);
+          }
+        }
+        const animating = zoom > fromZoom + 0.05;
+        if (animating) zoomAnimating.current = true;
+        map.setView([snap.lat, snap.lon], zoom, {
+          animate: animating,
+          duration: 0.55,
         });
-        smoothed.current = { lat: focusPt.lat, lon: focusPt.lon };
+        smoothed.current = { lat: snap.lat, lon: snap.lon };
         engaged.current = true;
         raf.current = requestAnimationFrame(tick);
         return;
       }
 
-      const desired = deadzoneDesiredCenter(map, focusPt, 0.55);
+      // Don't fight Leaflet's play-start zoom animation
+      if (zoomAnimating.current) {
+        raf.current = requestAnimationFrame(tick);
+        return;
+      }
+
+      const desired = deadzoneDesiredCenter(map, focusPt, deadzoneOpts);
       if (!desired) {
-        // Inside deadzone — hold camera (no setView → no shake)
         raf.current = requestAnimationFrame(tick);
         return;
       }
@@ -236,7 +495,7 @@ function FollowCamera({
       const cur =
         smoothed.current ??
         ({ lat: map.getCenter().lat, lon: map.getCenter().lng } as const);
-      const next = expSmooth(cur, desired, dt, 0.32);
+      const next = expSmooth(cur, desired, dt, isPack ? 0.4 : 0.32);
       smoothed.current = next;
 
       if (panExceedsEpsilon(map, cur, next, 0.5)) {
@@ -248,6 +507,7 @@ function FollowCamera({
 
     raf.current = requestAnimationFrame(tick);
     return () => {
+      map.off("zoomend", onZoomEnd);
       if (raf.current != null) cancelAnimationFrame(raf.current);
       raf.current = null;
       lastTs.current = 0;
@@ -292,6 +552,7 @@ export default function SessionMap({
   raceWindow = null,
   trailReveal = false,
   followTarget = null,
+  followPack = false,
   followPlaying = false,
   resizeToken,
   mapOpacity = 0.55,
@@ -386,6 +647,7 @@ export default function SessionMap({
         focus={followTarget}
         active={following}
         playing={followPlaying}
+        pack={followPack}
       />
       <InvalidateSize token={resizeToken} />
 
@@ -399,49 +661,11 @@ export default function SessionMap({
         />
       )}
 
-      {controls
-        .filter((c) => c.lat != null && c.lon != null)
-        .map((c) => {
-          const hot = hotControlIds.has(c.id);
-          return (
-            <CircleMarker
-              key={c.id}
-              center={[c.lat!, c.lon!]}
-              radius={hot ? 14 : 10}
-              pathOptions={{
-                color: hot ? "#e11d48" : "#c0392b",
-                fillColor: hot ? "#fecdd3" : "#fff",
-                fillOpacity: hot ? 1 : 0.9,
-                weight: hot ? 3 : 2,
-              }}
-            >
-              <Tooltip permanent direction="center">
-                {c.code}
-              </Tooltip>
-            </CircleMarker>
-          );
-        })}
+      <ControlSymbols controls={controls} hotIds={hotControlIds} />
 
       {/* Expanding rings when a runner punches */}
-      {punchFx.map((fx) => {
-        const ease = 1 - Math.pow(1 - fx.progress, 2);
-        const radius = 10 + ease * 28;
-        const opacity = Math.max(0, 0.85 * (1 - fx.progress));
-        return (
-          <CircleMarker
-            key={fx.key}
-            center={[fx.lat, fx.lon]}
-            radius={radius}
-            pathOptions={{
-              color: fx.color,
-              fillColor: fx.color,
-              fillOpacity: opacity * 0.25,
-              opacity,
-              weight: 2.5,
-            }}
-          />
-        );
-      })}
+      <PunchRipples items={punchFx} />
+
       {/* Full tracks — with trail reveal, always keep the entire past path visible
           even when a leg is highlighted / follow advances to the next leg. */}
       {tracks.map((t) => {
@@ -554,7 +778,7 @@ export default function SessionMap({
         if (!pos) return null;
         const icon = runnerAvatarIcon(t.name, t.color);
         return (
-          <Marker key={`av-${t.id}`} position={[pos.lat, pos.lon]} icon={icon}>
+          <Marker key={`av-${t.id}`} position={[pos.lat, pos.lon]} icon={icon} zIndexOffset={800}>
             <Tooltip direction="top" offset={[0, -16]}>
               {t.name}
             </Tooltip>
