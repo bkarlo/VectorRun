@@ -33,12 +33,16 @@ import {
   medalForRank,
 } from "@/lib/analysis";
 import { isExtraDistanceFlag, isNotableComeBack } from "@/lib/decisionQuality";
+import { haversineM } from "@/lib/gpx";
 import {
   actionAppendGpxToRunner,
+  actionClearPunchOverride,
   actionDeleteParticipant,
   actionFillTrackPrefix,
   actionMergeRunnerTracks,
   actionRenameParticipant,
+  actionSaveDisplayOptions,
+  actionSetPunchOverride,
   actionSetReference,
   actionSetRunnerDelta,
   actionSetRunnerSyncStrategy,
@@ -68,6 +72,9 @@ interface Props {
   dayPhases: DayPhaseRow[];
   tracks: SessionTrack[];
   analysis: AnalysisPayload;
+  punchOverrides?: Record<string, Record<string, number>>;
+  initialCourseId?: string | null;
+  canSetup?: boolean;
 }
 
 export default function SessionWorkspace({
@@ -77,13 +84,21 @@ export default function SessionWorkspace({
   dayPhases: _dayPhases,
   tracks: initialTracks,
   analysis,
+  punchOverrides = {},
+  initialCourseId = null,
+  canSetup = true,
 }: Props) {
   const [selected, setSelected] = useState<Record<string, boolean>>(() => {
     const s: Record<string, boolean> = {};
     for (const t of initialTracks) s[t.participant.id] = true;
     return s;
   });
-  const [coursePhaseIndex, setCoursePhaseIndex] = useState(0);
+  const coursePhases = analysis.coursePhases ?? [];
+  const [coursePhaseIndex, setCoursePhaseIndex] = useState(() => {
+    if (!initialCourseId) return 0;
+    const i = coursePhases.findIndex((p) => p.id === initialCourseId);
+    return i >= 0 ? i : 0;
+  });
   const [analysisIndex, setAnalysisIndex] = useState(-1); // -1 = Overall S→F
   const [playing, setPlaying] = useState(false);
   const [replayMs, setReplayMs] = useState(0);
@@ -101,11 +116,19 @@ export default function SessionWorkspace({
   const [repairPanelOpen, setRepairPanelOpen] = useState(false);
   const [repairStatus, setRepairStatus] = useState("");
   const [repairBusy, setRepairBusy] = useState(false);
+  const [punchEditId, setPunchEditId] = useState("");
+  const [punchEditCode, setPunchEditCode] = useState("");
+  const [showBasemap, setShowBasemap] = useState(event.show_basemap !== false);
+  const [showControlSymbols, setShowControlSymbols] = useState(
+    event.show_control_symbols !== false
+  );
+  const [controlSymbolScale, setControlSymbolScale] = useState(
+    event.control_symbol_scale ?? 0.7
+  );
   const appendInputRef = useRef<HTMLInputElement>(null);
   const playRef = useRef<number | null>(null);
   const PLAYBACK_SPEEDS = [1, 2, 5, 10, 30, 60, 120, 300] as const;
 
-  const coursePhases = analysis.coursePhases ?? [];
   const activeCourse =
     coursePhases[
       Math.min(Math.max(0, coursePhaseIndex), Math.max(0, coursePhases.length - 1))
@@ -619,7 +642,12 @@ export default function SessionWorkspace({
     const punchTimeBySeq = new Map<number, number>();
     let fromIdx = 0;
     for (const pt of courseCtrlPoints) {
-      const idx = findPunchIndex(track.syncedPoints, pt, fromIdx);
+      const idx = findPunchIndex(
+        track.syncedPoints,
+        pt,
+        fromIdx,
+        event.punch_radius_m
+      );
       if (idx < 0) continue;
       const ctrl = controls.find(
         (c) =>
@@ -657,6 +685,7 @@ export default function SessionWorkspace({
     courseCtrlPoints,
     syncedTracks,
     controls,
+    event.punch_radius_m,
   ]);
 
   useEffect(() => {
@@ -871,6 +900,37 @@ export default function SessionWorkspace({
     return true;
   });
 
+  const handleMapPunchClick = (lat: number, lon: number) => {
+    if (!canSetup || !punchEditId || !punchEditCode) return;
+    const track = initialTracks.find((t) => t.participant.id === punchEditId);
+    if (!track || track.points.length === 0) return;
+    let best = 0;
+    let bestD = Infinity;
+    for (let i = 0; i < track.points.length; i++) {
+      const d = haversineM(track.points[i], { lat, lon });
+      if (d < bestD) {
+        bestD = d;
+        best = i;
+      }
+    }
+    if (bestD > 80) return;
+    void actionSetPunchOverride(
+      event.id,
+      punchEditId,
+      punchEditCode,
+      track.points[best].time
+    );
+  };
+
+  const sessionMapExtras = {
+    showBasemap,
+    showControlSymbols,
+    controlSymbolScale,
+    punchRadiusM: event.punch_radius_m,
+    onTrackClick:
+      canSetup && punchEditId && punchEditCode ? handleMapPunchClick : undefined,
+  };
+
   return (
     <div className="h-[100dvh] flex flex-col">
       <header
@@ -880,7 +940,7 @@ export default function SessionWorkspace({
       >
         <div className="flex items-center gap-2 sm:gap-3 min-w-0 flex-1">
           <Link
-            href="/"
+            href={coursePhases.length > 1 ? `/events/${event.id}` : "/"}
             className="font-display text-base sm:text-lg text-forest-900 shrink-0"
           >
             VectorRun
@@ -910,12 +970,14 @@ export default function SessionWorkspace({
             </>
           )}
         </div>
+        {canSetup ? (
         <Link
           href={`/events/${event.id}/setup`}
           className="text-sm px-2.5 sm:px-3 py-1.5 rounded-lg border border-forest-200 hover:bg-forest-50 shrink-0"
         >
           Setup
         </Link>
+        ) : null}
       </header>
 
       {/* Mobile tabs */}
@@ -1035,7 +1097,9 @@ export default function SessionWorkspace({
                       name="name"
                       defaultValue={t.participant.name}
                       className="w-full min-w-0 text-sm font-medium bg-transparent border-b border-transparent hover:border-forest-200 focus:border-forest-500 outline-none px-0.5 py-0.5 truncate"
+                      readOnly={!canSetup}
                       onBlur={(e) => {
+                        if (!canSetup) return;
                         if (
                           e.target.value.trim() &&
                           e.target.value.trim() !== t.participant.name
@@ -1203,6 +1267,25 @@ export default function SessionWorkspace({
                     </a>
                   )}
 
+                  {canSetup && t.points.length > 0 ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPunchEditId(
+                          punchEditId === t.participant.id
+                            ? ""
+                            : t.participant.id
+                        );
+                        setPunchEditCode("");
+                      }}
+                      className="text-[10px] text-forest-600 hover:underline shrink-0"
+                      title="Override punch times"
+                    >
+                      Punches
+                    </button>
+                  ) : null}
+
+                  {canSetup ? (
                   <form action={actionDeleteParticipant} className="shrink-0">
                     <input type="hidden" name="event_id" value={event.id} />
                     <input
@@ -1218,11 +1301,14 @@ export default function SessionWorkspace({
                       ×
                     </button>
                   </form>
+                  ) : null}
                 </li>
               );
             })}
           </ul>
 
+          {canSetup ? (
+            <>
           <label className="block rounded-lg border border-dashed border-forest-300 p-3 text-center text-sm cursor-pointer hover:bg-forest-50">
             Upload GPX
             <input
@@ -1236,9 +1322,123 @@ export default function SessionWorkspace({
           {uploadStatus && (
             <p className="text-xs text-forest-600 font-mono">{uploadStatus}</p>
           )}
+            </>
+          ) : null}
+
+          {canSetup && punchEditId ? (
+            <div className="rounded-lg border border-forest-200 bg-white p-3 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <h3 className="text-xs font-semibold uppercase tracking-wider text-forest-600">
+                  Punch times ·{" "}
+                  {initialTracks.find((t) => t.participant.id === punchEditId)
+                    ?.participant.name ?? "runner"}
+                </h3>
+                <button
+                  type="button"
+                  className="text-xs text-forest-500"
+                  onClick={() => {
+                    setPunchEditId("");
+                    setPunchEditCode("");
+                  }}
+                >
+                  Close
+                </button>
+              </div>
+              <p className="text-[11px] text-forest-600 leading-snug">
+                Select a control, then Set at playhead or click the GPX on the
+                map where they actually punched.
+              </p>
+              <ul className="space-y-1 max-h-40 overflow-auto">
+                {(activeCourse?.controlCodes.length
+                  ? activeCourse.controlCodes
+                  : controls.map((c) => c.code)
+                ).map((code) => {
+                  const overridden = punchOverrides[punchEditId]?.[code];
+                  const runner = syncedTracks.find(
+                    (t) => t.participant.id === punchEditId
+                  );
+                  const realized =
+                    activeCourse?.realizedPath?.[punchEditId];
+                  const codeIdx = realized?.codes.indexOf(code) ?? -1;
+                  const autoIdx =
+                    codeIdx >= 0 ? realized?.punchIndices[codeIdx] : undefined;
+                  const autoTime =
+                    autoIdx != null &&
+                    autoIdx >= 0 &&
+                    runner?.syncedPoints[autoIdx]
+                      ? runner.syncedPoints[autoIdx].time
+                      : null;
+                  return (
+                    <li
+                      key={code}
+                      className={`flex items-center gap-2 text-xs ${
+                        punchEditCode === code ? "font-medium" : ""
+                      }`}
+                    >
+                      <button
+                        type="button"
+                        className={`rounded px-1.5 py-0.5 border ${
+                          punchEditCode === code
+                            ? "border-forest-600 bg-forest-100"
+                            : "border-forest-200"
+                        }`}
+                        onClick={() => setPunchEditCode(code)}
+                      >
+                        {code}
+                      </button>
+                      <span className="font-mono text-forest-600">
+                        {overridden != null
+                          ? `manual ${formatWallTime(overridden)}`
+                          : autoTime != null
+                            ? formatSplitTime(
+                                autoTime - playbackRange.min
+                              )
+                            : "—"}
+                      </span>
+                      <button
+                        type="button"
+                        className="ml-auto text-forest-700 hover:underline disabled:opacity-40"
+                        disabled={punchEditCode !== code}
+                        onClick={() => {
+                          const tr = syncedTracks.find(
+                            (x) => x.participant.id === punchEditId
+                          );
+                          if (!tr) return;
+                          const raw = replayMs - tr.offset;
+                          void actionSetPunchOverride(
+                            event.id,
+                            punchEditId,
+                            code,
+                            raw
+                          );
+                        }}
+                      >
+                        Set at playhead
+                      </button>
+                      {overridden != null ? (
+                        <button
+                          type="button"
+                          className="text-red-600 hover:underline"
+                          onClick={() =>
+                            void actionClearPunchOverride(
+                              event.id,
+                              punchEditId,
+                              code
+                            )
+                          }
+                        >
+                          Clear
+                        </button>
+                      ) : null}
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          ) : null}
           </div>
 
-          {initialTracks.some((t) => t.points.length > 0) && (
+          {initialTracks.some((t) => t.points.length > 0) && canSetup && (
             <div className="shrink-0 border-t border-forest-200 bg-white/90 p-2 space-y-2">
               {repairPanelOpen && (
                 <div className="rounded-lg border border-forest-200 bg-white p-3 space-y-2.5 max-h-[50dvh] overflow-auto">
@@ -1563,15 +1763,67 @@ export default function SessionWorkspace({
               resizeToken={`${mobileTab}-${mapFullscreen}`}
               mapOpacity={map?.opacity ?? 0.55}
               fillPreview={fillPreview}
+              {...sessionMapExtras}
             />
-            <button
-              type="button"
-              onClick={() => setMapFullscreen(true)}
-              className="absolute top-3 right-3 z-[1000] rounded-lg bg-white/95 border border-forest-200 shadow px-2.5 py-1.5 text-xs font-medium text-forest-800 hover:bg-forest-50"
-              title="Fullscreen map"
-            >
-              Fullscreen
-            </button>
+            <div className="absolute top-3 right-3 z-[1000] flex flex-col items-end gap-2">
+              <button
+                type="button"
+                onClick={() => setMapFullscreen(true)}
+                className="rounded-lg bg-white/95 border border-forest-200 shadow px-2.5 py-1.5 text-xs font-medium text-forest-800 hover:bg-forest-50"
+                title="Fullscreen map"
+              >
+                Fullscreen
+              </button>
+              <div className="rounded-lg bg-white/95 border border-forest-200 shadow px-2 py-1.5 flex flex-col gap-1 text-[11px] text-forest-800">
+                <label className="flex items-center gap-1.5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={showBasemap}
+                    onChange={(e) => setShowBasemap(e.target.checked)}
+                  />
+                  Background map
+                </label>
+                <label className="flex items-center gap-1.5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={showControlSymbols}
+                    onChange={(e) => setShowControlSymbols(e.target.checked)}
+                  />
+                  Control circles
+                </label>
+                {showControlSymbols ? (
+                  <label className="flex items-center gap-1.5">
+                    Size
+                    <input
+                      type="range"
+                      min={0.4}
+                      max={1.4}
+                      step={0.05}
+                      value={controlSymbolScale}
+                      onChange={(e) =>
+                        setControlSymbolScale(parseFloat(e.target.value))
+                      }
+                      className="w-16"
+                    />
+                  </label>
+                ) : null}
+                {canSetup ? (
+                  <button
+                    type="button"
+                    className="text-[10px] text-forest-600 hover:underline text-left"
+                    onClick={() =>
+                      void actionSaveDisplayOptions(event.id, {
+                        show_basemap: showBasemap,
+                        show_control_symbols: showControlSymbols,
+                        control_symbol_scale: controlSymbolScale,
+                      })
+                    }
+                  >
+                    Save as default
+                  </button>
+                ) : null}
+              </div>
+            </div>
           </div>
 
           <div className="shrink-0 border-t border-forest-200 bg-white/90 px-3 sm:px-4 py-2.5 sm:py-3 space-y-2">
@@ -1724,6 +1976,7 @@ export default function SessionWorkspace({
                   resizeToken={`splits-${mobileTab}-${analysisIndex}`}
                   mapOpacity={map?.opacity ?? 0.55}
                   fillPreview={fillPreview}
+              {...sessionMapExtras}
                 />
               </div>
               <div className="bg-white/95 px-3 py-2 space-y-1.5 border-t border-forest-100">
@@ -2020,6 +2273,7 @@ export default function SessionWorkspace({
               resizeToken={`fs-${mapFullscreen}`}
               mapOpacity={map?.opacity ?? 0.55}
               fillPreview={fillPreview}
+              {...sessionMapExtras}
             />
             <button
               type="button"

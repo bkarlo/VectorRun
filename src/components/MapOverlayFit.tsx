@@ -5,7 +5,6 @@ import {
   MapContainer,
   Marker,
   Polyline,
-  TileLayer,
   Tooltip,
   useMap,
 } from "react-leaflet";
@@ -15,6 +14,7 @@ import type { GeorefPair, MapPixel, TrackPoint } from "@/lib/types";
 import { fitAffine, mapToGps } from "@/lib/georef";
 import { DEFAULT_MAP_CENTER, DEFAULT_MAP_CENTER_TUPLE } from "@/lib/geoDefaults";
 import RotatedImageOverlay from "./RotatedImageOverlay";
+import BasemapTiles, { type BasemapKind } from "./BasemapTiles";
 
 export interface OverlayTrack {
   id: string;
@@ -47,21 +47,23 @@ const POINT_COLORS: Record<PointId, string> = {
   C: "#1e8449",
 };
 
-function pointIcon(id: PointId): L.DivIcon {
+function pinIcon(id: PointId): L.DivIcon {
   const color = POINT_COLORS[id];
   return L.divIcon({
-    className: "georef-point-icon",
-    html: `<div style="
-      width:28px;height:28px;border-radius:50%;
-      background:${color};color:#fff;
-      border:2px solid #fff;
-      box-shadow:0 1px 4px rgba(0,0,0,.35);
-      display:flex;align-items:center;justify-content:center;
-      font:700 13px/1 ui-sans-serif,system-ui,sans-serif;
-      cursor:grab;
-    ">${id}</div>`,
-    iconSize: [28, 28],
-    iconAnchor: [14, 14],
+    className: "georef-pin-icon",
+    html: `<div style="width:22px;height:34px;position:relative;">
+      <div style="
+        position:absolute;left:1px;top:0;
+        width:20px;height:20px;border-radius:50% 50% 50% 0;
+        background:${color};color:#fff;
+        border:2px solid #fff;
+        box-shadow:0 1px 4px rgba(0,0,0,.4);
+        transform:rotate(-45deg);
+        display:flex;align-items:center;justify-content:center;
+      "><span style="transform:rotate(45deg);font:700 11px/1 ui-sans-serif,system-ui,sans-serif">${id}</span></div>
+    </div>`,
+    iconSize: [22, 34],
+    iconAnchor: [11, 32],
   });
 }
 
@@ -148,6 +150,7 @@ export default function MapOverlayFit({
     initialGeoref.length >= 3 ? "place-osm" : "pick-map"
   );
   const [opacity, setOpacity] = useState(0.5);
+  const [basemap, setBasemap] = useState<BasemapKind>("osm");
   const [status, setStatus] = useState("");
   const [saving, setSaving] = useState(false);
   const imgRef = useRef<HTMLImageElement>(null);
@@ -269,6 +272,26 @@ export default function MapOverlayFit({
             2. Place on OSM
           </button>
         </div>
+        <div className="flex rounded-lg border border-forest-200 overflow-hidden text-sm">
+          <button
+            type="button"
+            className={`px-3 py-1.5 ${
+              basemap === "osm" ? "bg-forest-100 font-medium" : "bg-white"
+            }`}
+            onClick={() => setBasemap("osm")}
+          >
+            Map
+          </button>
+          <button
+            type="button"
+            className={`px-3 py-1.5 ${
+              basemap === "satellite" ? "bg-forest-100 font-medium" : "bg-white"
+            }`}
+            onClick={() => setBasemap("satellite")}
+          >
+            Satellite
+          </button>
+        </div>
         <label className="flex items-center gap-2 text-forest-700">
           <span className="text-xs uppercase tracking-wide">Opacity</span>
           <input
@@ -337,11 +360,17 @@ export default function MapOverlayFit({
                       top: `${(p.map!.y / mapHeight) * 100}%`,
                     }}
                   >
-                    <div
-                      className="w-7 h-7 rounded-full border-2 border-white flex items-center justify-center text-xs font-bold text-white shadow"
-                      style={{ background: POINT_COLORS[p.id] }}
-                    >
-                      {p.id}
+                    <div className="-translate-y-1/2 relative w-5 h-5">
+                      <div
+                        className="w-5 h-5 rotate-45 border-2 border-white shadow"
+                        style={{
+                          background: POINT_COLORS[p.id],
+                          borderRadius: "50% 50% 50% 0",
+                        }}
+                      />
+                      <span className="absolute inset-0 flex items-center justify-center text-[10px] font-bold text-white">
+                        {p.id}
+                      </span>
                     </div>
                   </div>
                 ))}
@@ -360,9 +389,9 @@ export default function MapOverlayFit({
       ) : (
         <>
           <p className="text-sm text-forest-600">
-            Drag markers <strong>A</strong>, <strong>B</strong>,{" "}
-            <strong>C</strong> freely to the matching features on OSM. The map
-            overlay updates when you release the marker. Tracks stay on top.
+            Drag pins <strong>A</strong>, <strong>B</strong>,{" "}
+            <strong>C</strong> to the matching features. Switch to satellite
+            if OSM is hard to read. The overlay updates when you release a pin.
           </p>
           <div className="rounded-xl overflow-hidden border border-forest-200 h-[min(70vh,560px)] relative">
             <MapContainer
@@ -371,11 +400,7 @@ export default function MapOverlayFit({
               className="h-full w-full"
               zoomControl
             >
-              <TileLayer
-                attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a>'
-                url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-                opacity={0.85}
-              />
+              <BasemapTiles kind={basemap} opacity={0.95} />
               <FitTracks tracks={tracks} />
               {overlayCorners && (
                 <RotatedImageOverlay
@@ -449,7 +474,7 @@ function DraggableControlMarker({
 }) {
   const draggingRef = useRef(false);
   const [pos, setPos] = useState<[number, number]>([lat, lon]);
-  const icon = useMemo(() => pointIcon(id), [id]);
+  const icon = useMemo(() => pinIcon(id), [id]);
 
   useEffect(() => {
     if (!draggingRef.current) {
@@ -476,7 +501,7 @@ function DraggableControlMarker({
         },
       }}
     >
-      <Tooltip permanent direction="top" offset={[0, -14]}>
+      <Tooltip permanent direction="top" offset={[0, -28]}>
         {id}
       </Tooltip>
     </Marker>

@@ -295,7 +295,11 @@ export function analyzeEvent(
   referenceId: string | null,
   controls: ControlRow[],
   runners: RunnerTrack[],
-  dayPhases: DayPhaseRow[]
+  dayPhases: DayPhaseRow[],
+  punch?: {
+    radiusM?: number;
+    overrides?: Record<string, Record<string, number>>;
+  }
 ): AnalysisPayload {
   const byCode = new Map(controls.map((c) => [c.code, c]));
   const geoByCode = new Map(
@@ -335,7 +339,11 @@ export function analyzeEvent(
         runner.points,
         def,
         geoByCode,
-        searchFrom
+        searchFrom,
+        {
+          radiusM: punch?.radiusM,
+          punchTimesByCode: punch?.overrides?.[id],
+        }
       );
       if (!win) {
         sliced.push({ runner, points: [] });

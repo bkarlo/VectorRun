@@ -94,6 +94,16 @@ export interface EventRow {
    * (trail draws as they move). Default on.
    */
   playback_trail_enabled: boolean;
+  /** Optional trainer notes (who set the course, training goal, …). */
+  description: string;
+  /** Punch detection circle in metres (default 15). */
+  punch_radius_m: number;
+  /** Show OSM/satellite tiles under the orienteering map. */
+  show_basemap: boolean;
+  /** Draw VectorRun control circles (turn off when the map already has them). */
+  show_control_symbols: boolean;
+  /** Scale of overlay control symbols (1 = ~30 m on the ground). */
+  control_symbol_scale: number;
   created_at: string;
 }
 

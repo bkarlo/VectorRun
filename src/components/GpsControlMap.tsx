@@ -1,11 +1,10 @@
 "use client";
 
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
-  CircleMarker,
   MapContainer,
+  Marker,
   Polyline,
-  TileLayer,
   Tooltip,
   useMap,
   useMapEvents,
@@ -17,6 +16,7 @@ import { fitAffine, mapToGps } from "@/lib/georef";
 import { DEFAULT_MAP_CENTER_TUPLE } from "@/lib/geoDefaults";
 import { trackTouchesControl } from "@/lib/sync";
 import RotatedImageOverlay from "./RotatedImageOverlay";
+import BasemapTiles, { type BasemapKind } from "./BasemapTiles";
 
 export interface GpsControlMarker {
   code: string;
@@ -83,6 +83,37 @@ function FitView({
   return null;
 }
 
+function controlPinIcon(
+  code: string,
+  selected: boolean,
+  color: string
+): L.DivIcon {
+  const size = selected ? 22 : 18;
+  const label = code.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+  return L.divIcon({
+    className: "georef-pin-icon",
+    html: `<div style="width:${size}px;height:${size + 12}px;position:relative;">
+      <div style="
+        position:absolute;left:1px;top:0;
+        width:${size - 2}px;height:${size - 2}px;border-radius:50% 50% 50% 0;
+        background:${color};
+        border:2px solid #fff;
+        box-shadow:0 1px 3px rgba(0,0,0,.35);
+        transform:rotate(-45deg);
+      "></div>
+      <div style="
+        position:absolute;left:${size + 4}px;top:0;
+        font:700 11px/1.2 ui-sans-serif,system-ui,sans-serif;
+        color:${color};
+        text-shadow:0 0 2px #fff,1px 0 0 #fff,-1px 0 0 #fff,0 1px 0 #fff,0 -1px 0 #fff;
+        white-space:nowrap;
+      ">${label}</div>
+    </div>`,
+    iconSize: [size, size + 12],
+    iconAnchor: [size / 2, size + 8],
+  });
+}
+
 export default function GpsControlMap({
   controls,
   tracks = [],
@@ -136,19 +167,17 @@ export default function GpsControlMap({
   }, [mapUrl, mapWidth, mapHeight, georef]);
 
   const hasMap = !!(mapUrl && overlayCorners);
+  const [basemap, setBasemap] = useState<BasemapKind>("osm");
 
   return (
+    <div className="relative h-full w-full min-h-[420px]">
     <MapContainer
       center={center}
       zoom={14}
       className="h-full w-full min-h-[420px] cursor-crosshair"
       zoomControl
     >
-      <TileLayer
-        attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a>'
-        url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-        opacity={hasMap ? 0.4 : 1}
-      />
+      <BasemapTiles kind={basemap} opacity={hasMap ? 0.45 : 1} />
       <ClickHandler onPlace={onPlace} />
       <FitView controls={controls} tracks={tracks} />
 
@@ -175,29 +204,45 @@ export default function GpsControlMap({
         const selected = selectedSequence === c.sequence;
         const allHit = touch && touch.total > 0 && touch.hit === touch.total;
         const noneHit = touch && touch.total > 0 && touch.hit === 0;
+        const color = noneHit ? "#b45309" : allHit ? "#15803d" : "#c0392b";
         return (
-          <CircleMarker
+          <Marker
             key={`${c.sequence}-${c.code}`}
-            center={[c.lat, c.lon]}
-            radius={selected ? 14 : 10}
-            pathOptions={{
-              color: noneHit ? "#b45309" : allHit ? "#15803d" : "#c0392b",
-              fillColor: "#fff",
-              fillOpacity: 0.95,
-              weight: selected ? 3 : 2,
-            }}
+            position={[c.lat, c.lon]}
+            icon={controlPinIcon(c.code || "?", selected, color)}
+            interactive={false}
           >
-            <Tooltip permanent direction="top" offset={[0, -8]}>
-              <span className="font-semibold">{c.code || "?"}</span>
-              {touch && touch.total > 0 ? (
-                <span className="ml-1 opacity-80">
-                  · {touch.hit}/{touch.total}
+            {touch && touch.total > 0 ? (
+              <Tooltip permanent direction="right" offset={[10, -8]}>
+                <span className="opacity-80">
+                  {touch.hit}/{touch.total}
                 </span>
-              ) : null}
-            </Tooltip>
-          </CircleMarker>
+              </Tooltip>
+            ) : null}
+          </Marker>
         );
       })}
     </MapContainer>
+      <div className="absolute top-3 right-3 z-[1000] flex rounded-lg border border-forest-200 overflow-hidden bg-white/95 shadow text-xs">
+        <button
+          type="button"
+          className={`px-2.5 py-1.5 ${
+            basemap === "osm" ? "bg-forest-100 font-medium" : ""
+          }`}
+          onClick={() => setBasemap("osm")}
+        >
+          Map
+        </button>
+        <button
+          type="button"
+          className={`px-2.5 py-1.5 ${
+            basemap === "satellite" ? "bg-forest-100 font-medium" : ""
+          }`}
+          onClick={() => setBasemap("satellite")}
+        >
+          Satellite
+        </button>
+      </div>
+    </div>
   );
 }

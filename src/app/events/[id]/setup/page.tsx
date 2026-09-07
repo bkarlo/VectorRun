@@ -1,8 +1,9 @@
 import Link from "next/link";
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 import SetupWizard from "@/components/SetupWizard";
 import { actionUpdateEventMeta } from "@/app/actions";
 import { getEvent, getMap, listControls, listDayPhases, listSetupTracks } from "@/lib/events";
+import { isSetupUnlocked } from "@/lib/auth";
 import {
   EXERCISE_LABELS,
   type ExerciseType,
@@ -17,6 +18,9 @@ export default async function SetupPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
+  if (!(await isSetupUnlocked())) {
+    redirect(`/login?next=${encodeURIComponent(`/events/${id}/setup`)}`);
+  }
   const event = getEvent(id);
   if (!event) notFound();
   const map = getMap(id);
@@ -44,7 +48,7 @@ export default async function SetupPage({
             </p>
           </div>
           <Link
-            href={`/events/${id}`}
+            href={`/events/${id}/session`}
             className="rounded-lg bg-forest-700 text-white px-4 py-2 text-sm font-medium hover:bg-forest-800"
           >
             Open session →
@@ -88,6 +92,18 @@ export default async function SetupPage({
           >
             Save meta
           </button>
+          <label className="flex flex-col gap-1 w-full">
+            <span className="text-xs uppercase tracking-wide text-forest-600">
+              Description
+            </span>
+            <textarea
+              name="description"
+              defaultValue={event.description}
+              rows={3}
+              placeholder="Who planned the course, training goal, notes…"
+              className="rounded-lg border border-forest-200 px-3 py-2"
+            />
+          </label>
         </form>
 
         <SetupWizard
@@ -110,6 +126,10 @@ export default async function SetupPage({
           initialMapOpacity={map?.opacity ?? 0.55}
           initialRaceWindowEnabled={event.race_window_enabled !== false}
           initialPlaybackTrailEnabled={event.playback_trail_enabled !== false}
+          initialPunchRadiusM={event.punch_radius_m}
+          initialShowBasemap={event.show_basemap !== false}
+          initialShowControlSymbols={event.show_control_symbols !== false}
+          initialControlSymbolScale={event.control_symbol_scale}
           initialDayPhases={dayPhases.map((p) => ({
             kind: p.kind,
             name: p.name,
