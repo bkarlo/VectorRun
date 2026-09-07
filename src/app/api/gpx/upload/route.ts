@@ -5,6 +5,10 @@ import { addParticipant, saveTrack } from "@/lib/events";
 export const runtime = "nodejs";
 
 export async function POST(req: NextRequest) {
+  const { isSetupUnlocked } = await import("@/lib/auth");
+  if (!(await isSetupUnlocked())) {
+    return NextResponse.json({ error: "Setup is locked" }, { status: 401 });
+  }
   const form = await req.formData();
   const eventId = String(form.get("eventId") || "");
   const participantId = String(form.get("participantId") || "");

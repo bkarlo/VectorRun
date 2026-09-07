@@ -54,8 +54,11 @@ Service → **Variables**:
 |------|--------|
 | `DATA_DIR` | `/data` |
 | `NODE_ENV` | `production` |
+| `SETUP_PASSWORD` | *(optional)* shared coach password so only you can create/edit/delete events |
 
 (`PORT` is set by Railway automatically.)
+
+If `SETUP_PASSWORD` is set, replay stays public. Create, setup, delete, GPX upload, and punch edits require **Coach login** at `/login`.
 
 ### 5. Generate a public URL
 
@@ -79,10 +82,10 @@ Or skip seeding and upload GPX in the UI.
 
 ## Workflow
 
-1. **Create an event** (opens the session immediately).
-2. **Upload GPX** — map image is optional.
-3. **Optional Setup** — map georef and/or OSM controls for splits.
-4. **Session** — replay, per-runner sync, speed chart, leg splits.
+1. **Create an event** (opens the event page — or the map if there is only one course).
+2. **Upload GPX** — map image is optional. Add a description (who set the course, training goal).
+3. **Optional Setup** — map georef (pins + satellite), punch radius, control-circle size.
+4. **Session** — replay, per-runner sync, speed chart, leg splits. Hide OSM or overlay controls if the map already has them. Override a bad punch from the runner list.
 
 ## Stack
 

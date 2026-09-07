@@ -105,6 +105,29 @@ function migrate(database: Database.Database) {
       `ALTER TABLE events ADD COLUMN playback_trail_enabled INTEGER NOT NULL DEFAULT 1`
     );
   }
+  if (!eventCols.has("description")) {
+    database.exec(`ALTER TABLE events ADD COLUMN description TEXT NOT NULL DEFAULT ''`);
+  }
+  if (!eventCols.has("punch_radius_m")) {
+    database.exec(
+      `ALTER TABLE events ADD COLUMN punch_radius_m REAL NOT NULL DEFAULT 15`
+    );
+  }
+  if (!eventCols.has("show_basemap")) {
+    database.exec(
+      `ALTER TABLE events ADD COLUMN show_basemap INTEGER NOT NULL DEFAULT 1`
+    );
+  }
+  if (!eventCols.has("show_control_symbols")) {
+    database.exec(
+      `ALTER TABLE events ADD COLUMN show_control_symbols INTEGER NOT NULL DEFAULT 1`
+    );
+  }
+  if (!eventCols.has("control_symbol_scale")) {
+    database.exec(
+      `ALTER TABLE events ADD COLUMN control_symbol_scale REAL NOT NULL DEFAULT 0.7`
+    );
+  }
 
   const partCols = tableColumns(database, "participants");
   if (!partCols.has("sync_strategy")) {
@@ -154,6 +177,15 @@ function migrate(database: Database.Database) {
     database.exec(`ALTER TABLE day_phases ADD COLUMN course_json TEXT`);
   }
 
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS punch_overrides (
+      participant_id TEXT NOT NULL REFERENCES participants(id) ON DELETE CASCADE,
+      control_code TEXT NOT NULL,
+      time_ms INTEGER NOT NULL,
+      PRIMARY KEY (participant_id, control_code)
+    );
+  `);
+
   // Bump cache when analysis payload semantics change
   const userVersion = Number(
     database.pragma("user_version", { simple: true }) ?? 0
@@ -171,6 +203,11 @@ function migrate(database: Database.Database) {
     // Arrive punch = latest near-closest (analysis times change)
     database.exec(`DELETE FROM analysis_cache`);
     database.pragma("user_version = 15");
+  }
+  if (userVersion < 16) {
+    // Tighter punch radius + closest-visit matching
+    database.exec(`DELETE FROM analysis_cache`);
+    database.pragma("user_version = 16");
   }
 }
 

@@ -6,7 +6,6 @@ import {
   MapContainer,
   Marker,
   Polyline,
-  TileLayer,
   Tooltip,
   useMap,
   useMapEvents,
@@ -26,6 +25,7 @@ import {
   panExceedsEpsilon,
 } from "@/lib/followCamera";
 import RotatedImageOverlay from "./RotatedImageOverlay";
+import BasemapTiles, { type BasemapKind } from "./BasemapTiles";
 
 /** ~5–6 mm on a 1:10k map ≈ 50–60 m on the ground (scaled −30%). */
 const CONTROL_RADIUS_M = 31.5;
@@ -114,9 +114,11 @@ function useMapZoom(): number {
 function ControlSymbols({
   controls,
   hotIds,
+  scale = 0.7,
 }: {
   controls: ControlRow[];
   hotIds: Set<string>;
+  scale?: number;
 }) {
   const map = useMap();
   const zoom = useMapZoom();
@@ -148,7 +150,7 @@ function ControlSymbols({
           // Soft min so symbols stay readable when fully zoomed out
           const radiusPx = Math.max(
             3.5,
-            CONTROL_RADIUS_M / Math.max(mpp, 1e-6)
+            (CONTROL_RADIUS_M * scale) / Math.max(mpp, 1e-6)
           );
           const icon = controlSymbolIcon(
             c.code,
@@ -173,6 +175,7 @@ function ControlSymbols({
 /** Expanding punch ring scaled like the control circle. */
 function PunchRipples({
   items,
+  scale = 0.7,
 }: {
   items: {
     key: string;
@@ -181,6 +184,7 @@ function PunchRipples({
     color: string;
     progress: number;
   }[];
+  scale?: number;
 }) {
   const zoom = useMapZoom();
 
@@ -191,7 +195,7 @@ function PunchRipples({
         const mpp = metersPerPixel(fx.lat, zoom);
         const baseR = Math.max(
           3.5,
-          CONTROL_RADIUS_M / Math.max(mpp, 1e-6)
+          (CONTROL_RADIUS_M * scale) / Math.max(mpp, 1e-6)
         );
         const radius = baseR + ease * baseR * 2.4;
         const opacity = Math.max(0, 0.85 * (1 - fx.progress));
@@ -304,6 +308,25 @@ interface Props {
   mapOpacity?: number;
   /** Dashed polyline for planned missing-start fill (control legs → first GPS). */
   fillPreview?: { lat: number; lon: number }[] | null;
+  showBasemap?: boolean;
+  showControlSymbols?: boolean;
+  controlSymbolScale?: number;
+  punchRadiusM?: number;
+  /** When set, clicking the map reports lat/lon (punch override). */
+  onTrackClick?: (lat: number, lon: number) => void;
+}
+
+function MapClickNotify({
+  onClick,
+}: {
+  onClick?: (lat: number, lon: number) => void;
+}) {
+  useMapEvents({
+    click(e) {
+      onClick?.(e.latlng.lat, e.latlng.lng);
+    },
+  });
+  return null;
 }
 
 function FitBounds({
@@ -557,6 +580,11 @@ export default function SessionMap({
   resizeToken,
   mapOpacity = 0.55,
   fillPreview = null,
+  showBasemap = true,
+  showControlSymbols = true,
+  controlSymbolScale = 0.7,
+  punchRadiusM,
+  onTrackClick,
 }: Props) {
   const corners = useMemo(() => {
     if (!mapAffine || mapWidth <= 0 || mapHeight <= 0) return null;
@@ -574,6 +602,7 @@ export default function SessionMap({
   const dimRace = !!highlightLeg && legTracks.length > 0;
   const useRaceSplit = !!raceWindow;
   const following = !!(followTarget && Number.isFinite(followTarget.lat));
+  const [basemap, setBasemap] = useState<BasemapKind>("osm");
 
   /** Recent control punches for ripple FX (age 0 = just punched). */
   const punchFx = useMemo(() => {
@@ -595,7 +624,8 @@ export default function SessionMap({
         const idx = findPunchIndex(
           t.points,
           { lat: c.lat!, lon: c.lon! },
-          searchFrom
+          searchFrom,
+          punchRadiusM
         );
         if (idx < 0) continue;
         searchFrom = idx + 1;
@@ -613,7 +643,7 @@ export default function SessionMap({
       }
     }
     return out;
-  }, [tracks, controls, replayMs]);
+  }, [tracks, controls, replayMs, punchRadiusM]);
 
   const hotControlIds = useMemo(() => {
     const s = new Set<string>();
@@ -627,6 +657,7 @@ export default function SessionMap({
   }, [punchFx, controls]);
 
   return (
+    <div className="relative h-full w-full">
     <MapContainer
       center={[
         (bounds[0][0] + bounds[1][0]) / 2,
@@ -636,11 +667,12 @@ export default function SessionMap({
       className="h-full w-full"
       zoomControl
     >
-      <TileLayer
-        attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a>'
-        url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+      <BasemapTiles
+        kind={basemap}
+        visible={showBasemap}
         opacity={hasMap ? 0.4 : 1}
       />
+      {onTrackClick ? <MapClickNotify onClick={onTrackClick} /> : null}
       <FitBounds bounds={bounds} />
       <FocusBounds bounds={focusBounds} disabled={following} />
       <FollowCamera
@@ -661,10 +693,16 @@ export default function SessionMap({
         />
       )}
 
-      <ControlSymbols controls={controls} hotIds={hotControlIds} />
+      {showControlSymbols ? (
+        <ControlSymbols
+          controls={controls}
+          hotIds={hotControlIds}
+          scale={controlSymbolScale}
+        />
+      ) : null}
 
       {/* Expanding rings when a runner punches */}
-      <PunchRipples items={punchFx} />
+      <PunchRipples items={punchFx} scale={controlSymbolScale} />
 
       {/* Full tracks — with trail reveal, always keep the entire past path visible
           even when a leg is highlighted / follow advances to the next leg. */}
@@ -804,5 +842,28 @@ export default function SessionMap({
         </CircleMarker>
       ))}
     </MapContainer>
+      {showBasemap ? (
+        <div className="absolute bottom-3 left-3 z-[1000] flex rounded-lg border border-forest-200 overflow-hidden bg-white/95 shadow text-xs">
+          <button
+            type="button"
+            className={`px-2.5 py-1.5 ${
+              basemap === "osm" ? "bg-forest-100 font-medium" : ""
+            }`}
+            onClick={() => setBasemap("osm")}
+          >
+            Map
+          </button>
+          <button
+            type="button"
+            className={`px-2.5 py-1.5 ${
+              basemap === "satellite" ? "bg-forest-100 font-medium" : ""
+            }`}
+            onClick={() => setBasemap("satellite")}
+          >
+            Satellite
+          </button>
+        </div>
+      ) : null}
+    </div>
   );
 }

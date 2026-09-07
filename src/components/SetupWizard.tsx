@@ -18,6 +18,7 @@ import {
   actionSaveMapOpacity,
   actionSaveRaceWindow,
   actionSavePlaybackTrail,
+  actionSaveDisplayOptions,
 } from "@/app/actions";
 import { fitAffine, gpsToMap } from "@/lib/georef";
 import { trackTouchesControl } from "@/lib/sync";
@@ -54,6 +55,10 @@ interface Props {
   initialMapOpacity?: number;
   initialRaceWindowEnabled?: boolean;
   initialPlaybackTrailEnabled?: boolean;
+  initialPunchRadiusM?: number;
+  initialShowBasemap?: boolean;
+  initialShowControlSymbols?: boolean;
+  initialControlSymbolScale?: number;
   initialDayPhases?: {
     kind: DayPhaseKind;
     name: string;
@@ -121,6 +126,19 @@ export default function SetupWizard(props: Props) {
     props.initialPlaybackTrailEnabled !== false
   );
   const [playbackTrailStatus, setPlaybackTrailStatus] = useState("");
+  const [punchRadiusM, setPunchRadiusM] = useState(
+    props.initialPunchRadiusM ?? 15
+  );
+  const [showBasemap, setShowBasemap] = useState(
+    props.initialShowBasemap !== false
+  );
+  const [showControlSymbols, setShowControlSymbols] = useState(
+    props.initialShowControlSymbols !== false
+  );
+  const [controlSymbolScale, setControlSymbolScale] = useState(
+    props.initialControlSymbolScale ?? 0.7
+  );
+  const [displayStatus, setDisplayStatus] = useState("");
   const [dayPhases, setDayPhases] = useState<DayPhaseDraft[]>(() =>
     props.initialDayPhases?.length
       ? props.initialDayPhases.map(draftFromInitial)
@@ -334,7 +352,7 @@ export default function SetupWizard(props: Props) {
             />
           </label>
           <Link
-            href={`/events/${props.eventId}`}
+            href={`/events/${props.eventId}/session`}
             className="rounded-lg border border-forest-300 bg-white px-4 py-2 text-sm font-medium hover:bg-forest-50"
           >
             Open session →
@@ -458,6 +476,89 @@ export default function SetupWizard(props: Props) {
             {playbackTrailStatus}
           </span>
         )}
+      </div>
+
+      <div className="panel rounded-xl p-4 space-y-3">
+        <div>
+          <h3 className="font-display text-base text-forest-900">
+            Map & punch detection
+          </h3>
+          <p className="text-xs text-forest-600">
+            Smaller punch radius avoids grabbing a control you only ran near.
+            Hide overlay circles when the orienteering map already has them.
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-4">
+          <label className="flex items-center gap-2 text-sm text-forest-800">
+            Punch radius
+            <input
+              type="range"
+              min={8}
+              max={40}
+              step={1}
+              value={punchRadiusM}
+              onChange={(e) => setPunchRadiusM(parseFloat(e.target.value))}
+              className="w-32"
+            />
+            <span className="font-mono text-xs w-10">{punchRadiusM} m</span>
+          </label>
+          <label className="flex items-center gap-2 text-sm text-forest-800">
+            Control size
+            <input
+              type="range"
+              min={0.4}
+              max={1.4}
+              step={0.05}
+              value={controlSymbolScale}
+              onChange={(e) =>
+                setControlSymbolScale(parseFloat(e.target.value))
+              }
+              className="w-28"
+            />
+            <span className="font-mono text-xs w-8">
+              {Math.round(controlSymbolScale * 100)}%
+            </span>
+          </label>
+        </div>
+        <div className="flex flex-wrap items-center gap-4">
+          <label className="flex items-center gap-2 text-sm text-forest-800 cursor-pointer">
+            <input
+              type="checkbox"
+              className="rounded border-forest-300"
+              checked={showControlSymbols}
+              onChange={(e) => setShowControlSymbols(e.target.checked)}
+            />
+            Draw control circles on the session map
+          </label>
+          <label className="flex items-center gap-2 text-sm text-forest-800 cursor-pointer">
+            <input
+              type="checkbox"
+              className="rounded border-forest-300"
+              checked={showBasemap}
+              onChange={(e) => setShowBasemap(e.target.checked)}
+            />
+            Show OSM / satellite under the orienteering map
+          </label>
+          <button
+            type="button"
+            className="rounded-lg bg-forest-700 text-white px-3 py-1.5 text-sm font-medium"
+            onClick={() => {
+              void actionSaveDisplayOptions(props.eventId, {
+                punch_radius_m: punchRadiusM,
+                show_basemap: showBasemap,
+                show_control_symbols: showControlSymbols,
+                control_symbol_scale: controlSymbolScale,
+              }).then(() => setDisplayStatus("Saved"));
+            }}
+          >
+            Save
+          </button>
+          {displayStatus && (
+            <span className="text-xs font-mono text-forest-600">
+              {displayStatus}
+            </span>
+          )}
+        </div>
       </div>
 
       <div className="flex flex-wrap gap-2 items-center">

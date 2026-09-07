@@ -34,23 +34,42 @@ function normalizeParticipant(row: ParticipantRow): ParticipantRow {
   };
 }
 
+function boolFlag(value: unknown, defaultOn: boolean): boolean {
+  if (value === false || value === 0) return false;
+  if (value === true || value === 1) return true;
+  return defaultOn;
+}
+
 function normalizeEvent(row: EventRow): EventRow {
   const raw = row as unknown as {
     reference_participant_id?: string | null;
     race_window_enabled?: number | boolean;
     playback_trail_enabled?: number | boolean;
+    description?: string | null;
+    punch_radius_m?: number | null;
+    show_basemap?: number | boolean;
+    show_control_symbols?: number | boolean;
+    control_symbol_scale?: number | null;
   };
+  const radius =
+    typeof raw.punch_radius_m === "number" && Number.isFinite(raw.punch_radius_m)
+      ? raw.punch_radius_m
+      : 15;
+  const scale =
+    typeof raw.control_symbol_scale === "number" &&
+    Number.isFinite(raw.control_symbol_scale)
+      ? raw.control_symbol_scale
+      : 0.7;
   return {
     ...row,
     reference_participant_id: raw.reference_participant_id ?? null,
-    race_window_enabled:
-      raw.race_window_enabled === false || raw.race_window_enabled === 0
-        ? false
-        : true,
-    playback_trail_enabled:
-      raw.playback_trail_enabled === false || raw.playback_trail_enabled === 0
-        ? false
-        : true,
+    race_window_enabled: boolFlag(raw.race_window_enabled, true),
+    playback_trail_enabled: boolFlag(raw.playback_trail_enabled, true),
+    description: (raw.description ?? "").toString(),
+    punch_radius_m: Math.min(80, Math.max(5, radius)),
+    show_basemap: boolFlag(raw.show_basemap, true),
+    show_control_symbols: boolFlag(raw.show_control_symbols, true),
+    control_symbol_scale: Math.min(1.8, Math.max(0.35, scale)),
   };
 }
 
@@ -84,14 +103,21 @@ export function createEvent(name: string, exerciseType: ExerciseType): EventRow 
 export function updateEvent(
   id: string,
   patch: Partial<
-    Pick<EventRow, "name" | "exercise_type" | "sync_mode" | "reference_participant_id">
+    Pick<
+      EventRow,
+      | "name"
+      | "exercise_type"
+      | "sync_mode"
+      | "reference_participant_id"
+      | "description"
+    >
   >
 ) {
   const event = getEvent(id);
   if (!event) throw new Error("Event not found");
   getDb()
     .prepare(
-      `UPDATE events SET name = ?, exercise_type = ?, sync_mode = ?, reference_participant_id = ? WHERE id = ?`
+      `UPDATE events SET name = ?, exercise_type = ?, sync_mode = ?, reference_participant_id = ?, description = ? WHERE id = ?`
     )
     .run(
       patch.name ?? event.name,
@@ -100,10 +126,54 @@ export function updateEvent(
       patch.reference_participant_id !== undefined
         ? patch.reference_participant_id
         : event.reference_participant_id,
+      patch.description !== undefined ? patch.description : event.description,
       id
     );
   invalidateAnalysis(id);
   return getEvent(id)!;
+}
+
+export function setEventDisplayOptions(
+  eventId: string,
+  patch: Partial<
+    Pick<
+      EventRow,
+      | "punch_radius_m"
+      | "show_basemap"
+      | "show_control_symbols"
+      | "control_symbol_scale"
+    >
+  >
+) {
+  const event = getEvent(eventId);
+  if (!event) throw new Error("Event not found");
+  const radius =
+    patch.punch_radius_m !== undefined
+      ? Math.min(80, Math.max(5, patch.punch_radius_m))
+      : event.punch_radius_m;
+  const scale =
+    patch.control_symbol_scale !== undefined
+      ? Math.min(1.8, Math.max(0.35, patch.control_symbol_scale))
+      : event.control_symbol_scale;
+  const showBasemap =
+    patch.show_basemap !== undefined ? patch.show_basemap : event.show_basemap;
+  const showSymbols =
+    patch.show_control_symbols !== undefined
+      ? patch.show_control_symbols
+      : event.show_control_symbols;
+  getDb()
+    .prepare(
+      `UPDATE events SET punch_radius_m = ?, show_basemap = ?, show_control_symbols = ?, control_symbol_scale = ? WHERE id = ?`
+    )
+    .run(
+      radius,
+      showBasemap ? 1 : 0,
+      showSymbols ? 1 : 0,
+      scale,
+      eventId
+    );
+  if (patch.punch_radius_m !== undefined) invalidateAnalysis(eventId);
+  return getEvent(eventId)!;
 }
 
 export function setRaceWindowEnabled(eventId: string, enabled: boolean) {
@@ -118,6 +188,75 @@ export function setPlaybackTrailEnabled(eventId: string, enabled: boolean) {
     .prepare(`UPDATE events SET playback_trail_enabled = ? WHERE id = ?`)
     .run(enabled ? 1 : 0, eventId);
   return getEvent(eventId)!;
+}
+
+export function listEventCards(): {
+  event: EventRow;
+  courses: { id: string; name: string }[];
+}[] {
+  return listEvents().map((event) => {
+    const courses = listDayPhases(event.id)
+      .filter((p) => p.kind === "course")
+      .map((p) => ({ id: p.id, name: p.name }));
+    return { event, courses };
+  });
+}
+
+export function listPunchOverridesForEvent(
+  eventId: string
+): Record<string, Record<string, number>> {
+  const parts = listParticipants(eventId);
+  if (parts.length === 0) return {};
+  const placeholders = parts.map(() => "?").join(",");
+  const rows = getDb()
+    .prepare(
+      `SELECT participant_id, control_code, time_ms
+       FROM punch_overrides
+       WHERE participant_id IN (${placeholders})`
+    )
+    .all(...parts.map((p) => p.id)) as {
+    participant_id: string;
+    control_code: string;
+    time_ms: number;
+  }[];
+  const out: Record<string, Record<string, number>> = {};
+  for (const r of rows) {
+    if (!out[r.participant_id]) out[r.participant_id] = {};
+    out[r.participant_id][r.control_code] = r.time_ms;
+  }
+  return out;
+}
+
+export function setPunchOverride(
+  participantId: string,
+  controlCode: string,
+  timeMs: number
+) {
+  const participant = getDb()
+    .prepare(`SELECT event_id FROM participants WHERE id = ?`)
+    .get(participantId) as { event_id: string } | undefined;
+  if (!participant) throw new Error("Participant not found");
+  getDb()
+    .prepare(
+      `INSERT INTO punch_overrides (participant_id, control_code, time_ms)
+       VALUES (?, ?, ?)
+       ON CONFLICT(participant_id, control_code) DO UPDATE SET time_ms = excluded.time_ms`
+    )
+    .run(participantId, controlCode, Math.round(timeMs));
+  invalidateAnalysis(participant.event_id);
+}
+
+export function clearPunchOverride(participantId: string, controlCode: string) {
+  const participant = getDb()
+    .prepare(`SELECT event_id FROM participants WHERE id = ?`)
+    .get(participantId) as { event_id: string } | undefined;
+  if (!participant) return;
+  getDb()
+    .prepare(
+      `DELETE FROM punch_overrides WHERE participant_id = ? AND control_code = ?`
+    )
+    .run(participantId, controlCode);
+  invalidateAnalysis(participant.event_id);
 }
 
 export function setReferenceParticipant(
@@ -636,7 +775,11 @@ export function getOrComputeAnalysis(eventId: string): AnalysisPayload {
   }
 
   const dayPhases = listDayPhases(eventId);
-  const payload = analyzeEvent(referenceId, controls, runners, dayPhases);
+  const punchOverrides = listPunchOverridesForEvent(eventId);
+  const payload = analyzeEvent(referenceId, controls, runners, dayPhases, {
+    radiusM: event.punch_radius_m,
+    overrides: punchOverrides,
+  });
   getDb()
     .prepare(
       `INSERT INTO analysis_cache (event_id, payload_json, updated_at)
@@ -660,7 +803,8 @@ export function getEventBundle(eventId: string) {
   const analysis = getOrComputeAnalysis(eventId);
   const event = getEvent(eventId);
   if (!event) return null;
-  return { event, map, controls, dayPhases, tracks, analysis };
+  const punchOverrides = listPunchOverridesForEvent(eventId);
+  return { event, map, controls, dayPhases, tracks, analysis, punchOverrides };
 }
 
 function downsamplePoints(points: TrackPoint[], max = 600): TrackPoint[] {

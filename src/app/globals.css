@@ -39,8 +39,7 @@ body {
   border: none !important;
 }
 
-/* Orienteering control symbols (circle + code) */
-.o-control-symbol {
+.georef-pin-icon {
   background: transparent !important;
   border: none !important;
 }

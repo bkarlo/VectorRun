@@ -2,8 +2,10 @@
 
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
+import { assertCanSetup, lockSetup, unlockSetup } from "@/lib/auth";
 import {
   addParticipant,
+  clearPunchOverride,
   createEvent,
   deleteEvent,
   deleteParticipant,
@@ -17,8 +19,10 @@ import {
   saveGeoref,
   saveMapOpacity,
   saveTrack,
+  setEventDisplayOptions,
   setManualDelta,
   setParticipantSyncStrategy,
+  setPunchOverride,
   setRaceWindowEnabled,
   setPlaybackTrailEnabled,
   setReferenceParticipant,
@@ -38,7 +42,24 @@ import type {
   SyncStrategy,
 } from "@/lib/types";
 
+export async function actionUnlockSetup(formData: FormData) {
+  const password = String(formData.get("password") || "");
+  const next = String(formData.get("next") || "/");
+  const ok = await unlockSetup(password);
+  if (!ok) {
+    redirect(`/login?error=1&next=${encodeURIComponent(next)}`);
+  }
+  redirect(next.startsWith("/") ? next : "/");
+}
+
+export async function actionLockSetup() {
+  await lockSetup();
+  revalidatePath("/");
+  redirect("/");
+}
+
 export async function actionCreateEvent(formData: FormData) {
+  await assertCanSetup();
   const name = String(formData.get("name") || "Untitled event").trim();
   const exercise_type = String(
     formData.get("exercise_type") || "normal"
@@ -48,27 +69,33 @@ export async function actionCreateEvent(formData: FormData) {
 }
 
 export async function actionDeleteEvent(formData: FormData) {
+  await assertCanSetup();
   const id = String(formData.get("id"));
   deleteEvent(id);
   revalidatePath("/");
 }
 
 export async function actionUpdateEventMeta(formData: FormData) {
+  await assertCanSetup();
   const id = String(formData.get("id"));
   const name = String(formData.get("name") || "").trim();
   const exercise_type = String(formData.get("exercise_type")) as ExerciseType;
-  updateEvent(id, { name, exercise_type });
+  const description = String(formData.get("description") || "");
+  updateEvent(id, { name, exercise_type, description });
   revalidatePath(`/events/${id}`);
   revalidatePath(`/events/${id}/setup`);
+  revalidatePath(`/events/${id}/session`);
 }
 
 export async function actionSaveGeoref(eventId: string, pairs: GeorefPair[]) {
+  await assertCanSetup();
   saveGeoref(eventId, pairs);
   revalidatePath(`/events/${eventId}/setup`);
   revalidatePath(`/events/${eventId}`);
 }
 
 export async function actionSaveMapOpacity(eventId: string, opacity: number) {
+  await assertCanSetup();
   saveMapOpacity(eventId, opacity);
   revalidatePath(`/events/${eventId}/setup`);
   revalidatePath(`/events/${eventId}`);
@@ -78,6 +105,7 @@ export async function actionSaveRaceWindow(
   eventId: string,
   enabled: boolean
 ) {
+  await assertCanSetup();
   setRaceWindowEnabled(eventId, enabled);
   revalidatePath(`/events/${eventId}/setup`);
   revalidatePath(`/events/${eventId}`);
@@ -87,9 +115,51 @@ export async function actionSavePlaybackTrail(
   eventId: string,
   enabled: boolean
 ) {
+  await assertCanSetup();
   setPlaybackTrailEnabled(eventId, enabled);
   revalidatePath(`/events/${eventId}/setup`);
   revalidatePath(`/events/${eventId}`);
+}
+
+export async function actionSaveDisplayOptions(
+  eventId: string,
+  patch: {
+    punch_radius_m?: number;
+    show_basemap?: boolean;
+    show_control_symbols?: boolean;
+    control_symbol_scale?: number;
+  }
+) {
+  await assertCanSetup();
+  setEventDisplayOptions(eventId, patch);
+  revalidatePath(`/events/${eventId}/setup`);
+  revalidatePath(`/events/${eventId}`);
+  revalidatePath(`/events/${eventId}/session`);
+}
+
+export async function actionSetPunchOverride(
+  eventId: string,
+  participantId: string,
+  controlCode: string,
+  timeMs: number
+) {
+  await assertCanSetup();
+  assertParticipantInEvent(eventId, participantId);
+  setPunchOverride(participantId, controlCode, timeMs);
+  revalidatePath(`/events/${eventId}`);
+  revalidatePath(`/events/${eventId}/session`);
+}
+
+export async function actionClearPunchOverride(
+  eventId: string,
+  participantId: string,
+  controlCode: string
+) {
+  await assertCanSetup();
+  assertParticipantInEvent(eventId, participantId);
+  clearPunchOverride(participantId, controlCode);
+  revalidatePath(`/events/${eventId}`);
+  revalidatePath(`/events/${eventId}/session`);
 }
 
 export async function actionSaveDayPlan(
@@ -101,6 +171,7 @@ export async function actionSaveDayPlan(
     courseDef?: import("@/lib/courseDef").CourseDef | null;
   }[]
 ) {
+  await assertCanSetup();
   replaceDayPlan(eventId, phases);
   revalidatePath(`/events/${eventId}/setup`);
   revalidatePath(`/events/${eventId}`);
@@ -110,12 +181,14 @@ export async function actionSaveControls(
   eventId: string,
   controls: Omit<ControlRow, "id" | "event_id">[]
 ) {
+  await assertCanSetup();
   replaceControls(eventId, controls);
   revalidatePath(`/events/${eventId}/setup`);
   revalidatePath(`/events/${eventId}`);
 }
 
 export async function actionAddParticipant(formData: FormData) {
+  await assertCanSetup();
   const eventId = String(formData.get("event_id"));
   const name = String(formData.get("name") || "").trim();
   if (!name) return;
@@ -124,6 +197,7 @@ export async function actionAddParticipant(formData: FormData) {
 }
 
 export async function actionDeleteParticipant(formData: FormData) {
+  await assertCanSetup();
   const participantId = String(formData.get("participant_id"));
   const eventId = String(formData.get("event_id"));
   deleteParticipant(participantId);
@@ -131,6 +205,7 @@ export async function actionDeleteParticipant(formData: FormData) {
 }
 
 export async function actionRenameParticipant(formData: FormData) {
+  await assertCanSetup();
   const participantId = String(formData.get("participant_id"));
   const eventId = String(formData.get("event_id"));
   const name = String(formData.get("name") || "").trim();
@@ -140,6 +215,7 @@ export async function actionRenameParticipant(formData: FormData) {
 }
 
 export async function actionSetReference(formData: FormData) {
+  await assertCanSetup();
   const eventId = String(formData.get("event_id"));
   const participantId = String(formData.get("participant_id"));
   setReferenceParticipant(eventId, participantId);
@@ -147,6 +223,7 @@ export async function actionSetReference(formData: FormData) {
 }
 
 export async function actionSetRunnerSyncStrategy(formData: FormData) {
+  await assertCanSetup();
   const eventId = String(formData.get("event_id"));
   const participantId = String(formData.get("participant_id"));
   const strategy = String(formData.get("sync_strategy")) as SyncStrategy;
@@ -155,6 +232,7 @@ export async function actionSetRunnerSyncStrategy(formData: FormData) {
 }
 
 export async function actionSetRunnerDelta(formData: FormData) {
+  await assertCanSetup();
   const eventId = String(formData.get("event_id"));
   const participantId = String(formData.get("participant_id"));
   const deltaSec = Number(formData.get("delta_sec") || 0);
@@ -178,6 +256,7 @@ export async function actionMergeRunnerTracks(
   sourceId: string
 ): Promise<{ ok: true; pointCount: number } | { ok: false; error: string }> {
   try {
+    await assertCanSetup();
     if (targetId === sourceId) {
       return { ok: false, error: "Cannot merge a runner with itself" };
     }
@@ -220,6 +299,7 @@ export async function actionAppendGpxToRunner(
   filename: string
 ): Promise<{ ok: true; pointCount: number } | { ok: false; error: string }> {
   try {
+    await assertCanSetup();
     assertParticipantInEvent(eventId, participantId);
     const track = getTrackForParticipant(participantId);
     if (!track) {
@@ -252,6 +332,7 @@ export async function actionFillTrackPrefix(
   speedsMps: number[]
 ): Promise<{ ok: true; pointCount: number } | { ok: false; error: string }> {
   try {
+    await assertCanSetup();
     assertParticipantInEvent(eventId, participantId);
     if (controlIds.length === 0) {
       return { ok: false, error: "Select at least one control waypoint" };

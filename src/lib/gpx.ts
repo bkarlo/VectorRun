@@ -157,6 +157,27 @@ export function interpolateAtTime(
 }
 
 /** Points at or before t, ending at the interpolated position at t (for trail reveal). */
+/** Nearest sample to `timeMs` at or after `fromIndex` (monotonic tracks). */
+export function indexNearestTime(
+  points: TrackPoint[],
+  timeMs: number,
+  fromIndex = 0
+): number {
+  if (points.length === 0) return -1;
+  const start = Math.min(Math.max(0, fromIndex), points.length - 1);
+  let best = start;
+  let bestAbs = Math.abs(points[start].time - timeMs);
+  for (let i = start; i < points.length; i++) {
+    const d = Math.abs(points[i].time - timeMs);
+    if (d < bestAbs) {
+      bestAbs = d;
+      best = i;
+    }
+    if (points[i].time >= timeMs && i > start) break;
+  }
+  return best;
+}
+
 export function trackUpToTime(
   points: TrackPoint[],
   t: number
