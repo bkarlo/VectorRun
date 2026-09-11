@@ -517,3 +517,15 @@ export function formatWallTime(ms: number | null): string {
     return "—";
   }
 }
+
+/** Calendar date (YYYY-MM-DD) without UTC midnight shifting the day. */
+export function formatOccurredOn(isoDate: string | null | undefined): string {
+  if (!isoDate || !/^\d{4}-\d{2}-\d{2}/.test(isoDate)) return "";
+  const [y, m, d] = isoDate.slice(0, 10).split("-").map(Number);
+  if (!y || !m || !d) return isoDate.slice(0, 10);
+  return new Date(y, m - 1, d).toLocaleDateString("en-GB", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+  });
+}

@@ -13,8 +13,10 @@ import "leaflet/dist/leaflet.css";
 import type { GeorefPair, MapPixel, TrackPoint } from "@/lib/types";
 import { fitAffine, mapToGps } from "@/lib/georef";
 import { DEFAULT_MAP_CENTER, DEFAULT_MAP_CENTER_TUPLE } from "@/lib/geoDefaults";
+import { MAP_MAX_ZOOM, pinHtml, PIN_H, PIN_W } from "@/lib/mapPins";
 import RotatedImageOverlay from "./RotatedImageOverlay";
 import BasemapTiles, { type BasemapKind } from "./BasemapTiles";
+import HtmlMapPin from "./HtmlMapPin";
 
 export interface OverlayTrack {
   id: string;
@@ -51,19 +53,9 @@ function pinIcon(id: PointId): L.DivIcon {
   const color = POINT_COLORS[id];
   return L.divIcon({
     className: "georef-pin-icon",
-    html: `<div style="width:22px;height:34px;position:relative;">
-      <div style="
-        position:absolute;left:1px;top:0;
-        width:20px;height:20px;border-radius:50% 50% 50% 0;
-        background:${color};color:#fff;
-        border:2px solid #fff;
-        box-shadow:0 1px 4px rgba(0,0,0,.4);
-        transform:rotate(-45deg);
-        display:flex;align-items:center;justify-content:center;
-      "><span style="transform:rotate(45deg);font:700 11px/1 ui-sans-serif,system-ui,sans-serif">${id}</span></div>
-    </div>`,
-    iconSize: [22, 34],
-    iconAnchor: [11, 32],
+    html: pinHtml(color, id),
+    iconSize: [PIN_W, PIN_H],
+    iconAnchor: [PIN_W / 2, PIN_H],
   });
 }
 
@@ -352,27 +344,59 @@ export default function MapOverlayFit({
               {points
                 .filter((p) => p.map)
                 .map((p) => (
-                  <div
+                  <button
                     key={p.id}
-                    className="pointer-events-none absolute -translate-x-1/2 -translate-y-1/2"
+                    type="button"
+                    className="absolute z-10 cursor-grab active:cursor-grabbing touch-none p-0 border-0 bg-transparent"
                     style={{
                       left: `${(p.map!.x / mapWidth) * 100}%`,
                       top: `${(p.map!.y / mapHeight) * 100}%`,
+                      width: 24,
+                      height: 36,
+                      transform: "translate(-50%, -100%)",
+                    }}
+                    aria-label={`Move pin ${p.id}`}
+                    onPointerDown={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      const img = imgRef.current;
+                      if (!img) return;
+                      const pointerId = e.pointerId;
+                      (e.currentTarget as HTMLButtonElement).setPointerCapture(
+                        pointerId
+                      );
+                      const move = (ev: PointerEvent) => {
+                        const rect = img.getBoundingClientRect();
+                        const x = Math.min(
+                          mapWidth,
+                          Math.max(
+                            0,
+                            ((ev.clientX - rect.left) / rect.width) * mapWidth
+                          )
+                        );
+                        const y = Math.min(
+                          mapHeight,
+                          Math.max(
+                            0,
+                            ((ev.clientY - rect.top) / rect.height) * mapHeight
+                          )
+                        );
+                        setPoints((prev) =>
+                          prev.map((pt) =>
+                            pt.id === p.id ? { ...pt, map: { x, y } } : pt
+                          )
+                        );
+                      };
+                      const up = () => {
+                        window.removeEventListener("pointermove", move);
+                        window.removeEventListener("pointerup", up);
+                      };
+                      window.addEventListener("pointermove", move);
+                      window.addEventListener("pointerup", up);
                     }}
                   >
-                    <div className="-translate-y-1/2 relative w-5 h-5">
-                      <div
-                        className="w-5 h-5 rotate-45 border-2 border-white shadow"
-                        style={{
-                          background: POINT_COLORS[p.id],
-                          borderRadius: "50% 50% 50% 0",
-                        }}
-                      />
-                      <span className="absolute inset-0 flex items-center justify-center text-[10px] font-bold text-white">
-                        {p.id}
-                      </span>
-                    </div>
-                  </div>
+                    <HtmlMapPin color={POINT_COLORS[p.id]} label={p.id} tipAnchor={false} />
+                  </button>
                 ))}
             </div>
           </div>
@@ -397,6 +421,7 @@ export default function MapOverlayFit({
             <MapContainer
               center={mapCenter}
               zoom={15}
+              maxZoom={MAP_MAX_ZOOM}
               className="h-full w-full"
               zoomControl
             >
@@ -501,7 +526,7 @@ function DraggableControlMarker({
         },
       }}
     >
-      <Tooltip permanent direction="top" offset={[0, -28]}>
+      <Tooltip permanent direction="top" offset={[0, -PIN_H]}>
         {id}
       </Tooltip>
     </Marker>

@@ -86,6 +86,17 @@ export default async function SetupPage({
               ))}
             </select>
           </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-xs uppercase tracking-wide text-forest-600">
+              Training date
+            </span>
+            <input
+              type="date"
+              name="occurred_on"
+              defaultValue={event.occurred_on}
+              className="rounded-lg border border-forest-200 px-3 py-2"
+            />
+          </label>
           <button
             type="submit"
             className="rounded-lg border border-forest-200 px-4 py-2 text-sm hover:bg-forest-50"
@@ -123,7 +134,7 @@ export default async function SetupPage({
             map_y: c.map_y,
           }))}
           tracks={tracks}
-          initialMapOpacity={map?.opacity ?? 0.55}
+          initialMapOpacity={map?.opacity ?? 1}
           initialRaceWindowEnabled={event.race_window_enabled !== false}
           initialPlaybackTrailEnabled={event.playback_trail_enabled !== false}
           initialPunchRadiusM={event.punch_radius_m}

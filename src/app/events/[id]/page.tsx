@@ -5,6 +5,7 @@ import DeleteEventButton from "@/components/DeleteEventButton";
 import { getEventBundle } from "@/lib/events";
 import { isAuthRequired, isSetupUnlocked } from "@/lib/auth";
 import { EXERCISE_LABELS, type ExerciseType } from "@/lib/types";
+import { formatOccurredOn } from "@/lib/analysis";
 
 export const dynamic = "force-dynamic";
 
@@ -36,7 +37,7 @@ export default async function EventHubPage({
             <p className="text-sm text-forest-600 mt-1">
               {EXERCISE_LABELS[event.exercise_type as ExerciseType] ??
                 event.exercise_type}{" "}
-              · {new Date(event.created_at).toLocaleString()}
+              · {formatOccurredOn(event.occurred_on) || new Date(event.created_at).toLocaleString()}
             </p>
           </div>
           <div className="flex flex-wrap gap-2 justify-end">

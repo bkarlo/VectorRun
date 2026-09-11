@@ -40,6 +40,11 @@ function boolFlag(value: unknown, defaultOn: boolean): boolean {
   return defaultOn;
 }
 
+function clampNum(n: number, min: number, max: number, fallback: number): number {
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, n));
+}
+
 function normalizeEvent(row: EventRow): EventRow {
   const raw = row as unknown as {
     reference_participant_id?: string | null;
@@ -50,33 +55,45 @@ function normalizeEvent(row: EventRow): EventRow {
     show_basemap?: number | boolean;
     show_control_symbols?: number | boolean;
     control_symbol_scale?: number | null;
+    occurred_on?: string | null;
+    created_at?: string;
+    show_course_line?: number | boolean;
+    course_line_weight?: number | null;
+    control_stroke_scale?: number | null;
+    runner_marker_scale?: number | null;
+    track_weight?: number | null;
+    trail_tail_ms?: number | null;
   };
-  const radius =
-    typeof raw.punch_radius_m === "number" && Number.isFinite(raw.punch_radius_m)
-      ? raw.punch_radius_m
-      : 15;
-  const scale =
-    typeof raw.control_symbol_scale === "number" &&
-    Number.isFinite(raw.control_symbol_scale)
-      ? raw.control_symbol_scale
-      : 0.7;
+  const radius = clampNum(Number(raw.punch_radius_m), 5, 80, 15);
+  const scale = clampNum(Number(raw.control_symbol_scale), 0.35, 1.8, 0.7);
+  const occurred =
+    (raw.occurred_on && /^\d{4}-\d{2}-\d{2}/.test(raw.occurred_on)
+      ? raw.occurred_on.slice(0, 10)
+      : (raw.created_at ?? "").slice(0, 10)) || new Date().toISOString().slice(0, 10);
   return {
     ...row,
     reference_participant_id: raw.reference_participant_id ?? null,
     race_window_enabled: boolFlag(raw.race_window_enabled, true),
     playback_trail_enabled: boolFlag(raw.playback_trail_enabled, true),
     description: (raw.description ?? "").toString(),
-    punch_radius_m: Math.min(80, Math.max(5, radius)),
+    punch_radius_m: radius,
     show_basemap: boolFlag(raw.show_basemap, true),
     show_control_symbols: boolFlag(raw.show_control_symbols, true),
-    control_symbol_scale: Math.min(1.8, Math.max(0.35, scale)),
+    control_symbol_scale: scale,
+    occurred_on: occurred,
+    show_course_line: boolFlag(raw.show_course_line, true),
+    course_line_weight: clampNum(Number(raw.course_line_weight), 0.5, 8, 2),
+    control_stroke_scale: clampNum(Number(raw.control_stroke_scale), 0.4, 2.5, 1),
+    runner_marker_scale: clampNum(Number(raw.runner_marker_scale), 0.5, 2, 1),
+    track_weight: clampNum(Number(raw.track_weight), 1, 8, 3),
+    trail_tail_ms: Math.round(clampNum(Number(raw.trail_tail_ms), 0, 600_000, 0)),
   };
 }
 
 export function listEvents(): EventRow[] {
   return (
     getDb()
-      .prepare("SELECT * FROM events ORDER BY created_at DESC")
+      .prepare("SELECT * FROM events ORDER BY occurred_on DESC, created_at DESC")
       .all() as EventRow[]
   ).map(normalizeEvent);
 }
@@ -88,15 +105,23 @@ export function getEvent(id: string): EventRow | undefined {
   return row ? normalizeEvent(row) : undefined;
 }
 
-export function createEvent(name: string, exerciseType: ExerciseType): EventRow {
+export function createEvent(
+  name: string,
+  exerciseType: ExerciseType,
+  occurredOn?: string | null
+): EventRow {
   const id = uuid();
   const created_at = new Date().toISOString();
+  const occurred_on =
+    occurredOn && /^\d{4}-\d{2}-\d{2}$/.test(occurredOn)
+      ? occurredOn
+      : created_at.slice(0, 10);
   getDb()
     .prepare(
-      `INSERT INTO events (id, name, exercise_type, sync_mode, reference_participant_id, created_at)
-       VALUES (?, ?, ?, 'motion_start', NULL, ?)`
+      `INSERT INTO events (id, name, exercise_type, sync_mode, reference_participant_id, created_at, occurred_on)
+       VALUES (?, ?, ?, 'motion_start', NULL, ?, ?)`
     )
-    .run(id, name, exerciseType, created_at);
+    .run(id, name, exerciseType, created_at, occurred_on);
   return getEvent(id)!;
 }
 
@@ -110,14 +135,19 @@ export function updateEvent(
       | "sync_mode"
       | "reference_participant_id"
       | "description"
+      | "occurred_on"
     >
   >
 ) {
   const event = getEvent(id);
   if (!event) throw new Error("Event not found");
+  const occurred =
+    patch.occurred_on !== undefined
+      ? patch.occurred_on.slice(0, 10)
+      : event.occurred_on;
   getDb()
     .prepare(
-      `UPDATE events SET name = ?, exercise_type = ?, sync_mode = ?, reference_participant_id = ?, description = ? WHERE id = ?`
+      `UPDATE events SET name = ?, exercise_type = ?, sync_mode = ?, reference_participant_id = ?, description = ?, occurred_on = ? WHERE id = ?`
     )
     .run(
       patch.name ?? event.name,
@@ -127,6 +157,7 @@ export function updateEvent(
         ? patch.reference_participant_id
         : event.reference_participant_id,
       patch.description !== undefined ? patch.description : event.description,
+      /^\d{4}-\d{2}-\d{2}$/.test(occurred) ? occurred : event.occurred_on,
       id
     );
   invalidateAnalysis(id);
@@ -142,34 +173,72 @@ export function setEventDisplayOptions(
       | "show_basemap"
       | "show_control_symbols"
       | "control_symbol_scale"
+      | "show_course_line"
+      | "course_line_weight"
+      | "control_stroke_scale"
+      | "runner_marker_scale"
+      | "track_weight"
+      | "trail_tail_ms"
     >
   >
 ) {
   const event = getEvent(eventId);
   if (!event) throw new Error("Event not found");
-  const radius =
-    patch.punch_radius_m !== undefined
-      ? Math.min(80, Math.max(5, patch.punch_radius_m))
-      : event.punch_radius_m;
-  const scale =
-    patch.control_symbol_scale !== undefined
-      ? Math.min(1.8, Math.max(0.35, patch.control_symbol_scale))
-      : event.control_symbol_scale;
-  const showBasemap =
-    patch.show_basemap !== undefined ? patch.show_basemap : event.show_basemap;
-  const showSymbols =
-    patch.show_control_symbols !== undefined
-      ? patch.show_control_symbols
-      : event.show_control_symbols;
+  const next = {
+    punch_radius_m:
+      patch.punch_radius_m !== undefined
+        ? clampNum(patch.punch_radius_m, 5, 80, event.punch_radius_m)
+        : event.punch_radius_m,
+    show_basemap:
+      patch.show_basemap !== undefined ? patch.show_basemap : event.show_basemap,
+    show_control_symbols:
+      patch.show_control_symbols !== undefined
+        ? patch.show_control_symbols
+        : event.show_control_symbols,
+    control_symbol_scale:
+      patch.control_symbol_scale !== undefined
+        ? clampNum(patch.control_symbol_scale, 0.35, 1.8, event.control_symbol_scale)
+        : event.control_symbol_scale,
+    show_course_line:
+      patch.show_course_line !== undefined
+        ? patch.show_course_line
+        : event.show_course_line,
+    course_line_weight:
+      patch.course_line_weight !== undefined
+        ? clampNum(patch.course_line_weight, 0.5, 8, event.course_line_weight)
+        : event.course_line_weight,
+    control_stroke_scale:
+      patch.control_stroke_scale !== undefined
+        ? clampNum(patch.control_stroke_scale, 0.4, 2.5, event.control_stroke_scale)
+        : event.control_stroke_scale,
+    runner_marker_scale:
+      patch.runner_marker_scale !== undefined
+        ? clampNum(patch.runner_marker_scale, 0.5, 2, event.runner_marker_scale)
+        : event.runner_marker_scale,
+    track_weight:
+      patch.track_weight !== undefined
+        ? clampNum(patch.track_weight, 1, 8, event.track_weight)
+        : event.track_weight,
+    trail_tail_ms:
+      patch.trail_tail_ms !== undefined
+        ? Math.round(clampNum(patch.trail_tail_ms, 0, 600_000, event.trail_tail_ms))
+        : event.trail_tail_ms,
+  };
   getDb()
     .prepare(
-      `UPDATE events SET punch_radius_m = ?, show_basemap = ?, show_control_symbols = ?, control_symbol_scale = ? WHERE id = ?`
+      `UPDATE events SET punch_radius_m = ?, show_basemap = ?, show_control_symbols = ?, control_symbol_scale = ?, show_course_line = ?, course_line_weight = ?, control_stroke_scale = ?, runner_marker_scale = ?, track_weight = ?, trail_tail_ms = ? WHERE id = ?`
     )
     .run(
-      radius,
-      showBasemap ? 1 : 0,
-      showSymbols ? 1 : 0,
-      scale,
+      next.punch_radius_m,
+      next.show_basemap ? 1 : 0,
+      next.show_control_symbols ? 1 : 0,
+      next.control_symbol_scale,
+      next.show_course_line ? 1 : 0,
+      next.course_line_weight,
+      next.control_stroke_scale,
+      next.runner_marker_scale,
+      next.track_weight,
+      next.trail_tail_ms,
       eventId
     );
   if (patch.punch_radius_m !== undefined) invalidateAnalysis(eventId);
@@ -323,7 +392,7 @@ export function getMap(eventId: string): MapRow | undefined {
     opacity:
       typeof row.opacity === "number" && Number.isFinite(row.opacity)
         ? row.opacity
-        : 0.55,
+        : 1,
   };
 }
 
@@ -349,8 +418,8 @@ export function saveMapImage(
   } else {
     getDb()
       .prepare(
-        `INSERT INTO maps (id, event_id, image_path, width, height, georef_json)
-         VALUES (?, ?, ?, ?, ?, '[]')`
+        `INSERT INTO maps (id, event_id, image_path, width, height, georef_json, opacity)
+         VALUES (?, ?, ?, ?, ?, '[]', 1)`
       )
       .run(uuid(), eventId, stored, width, height);
   }
@@ -364,7 +433,7 @@ export function saveGeoref(eventId: string, pairs: GeorefPair[]) {
 }
 
 export function saveMapOpacity(eventId: string, opacity: number) {
-  const clamped = Math.min(0.95, Math.max(0.1, opacity));
+  const clamped = Math.min(1, Math.max(0.05, opacity));
   getDb()
     .prepare(`UPDATE maps SET opacity = ? WHERE event_id = ?`)
     .run(clamped, eventId);

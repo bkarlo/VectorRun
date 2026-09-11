@@ -104,6 +104,15 @@ export interface EventRow {
   show_control_symbols: boolean;
   /** Scale of overlay control symbols (1 = ~30 m on the ground). */
   control_symbol_scale: number;
+  /** Training day (YYYY-MM-DD), independent of when the event was uploaded. */
+  occurred_on: string;
+  show_course_line: boolean;
+  course_line_weight: number;
+  control_stroke_scale: number;
+  runner_marker_scale: number;
+  track_weight: number;
+  /** If > 0, only draw this many ms of track behind the playhead. */
+  trail_tail_ms: number;
   created_at: string;
 }
 

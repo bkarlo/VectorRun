@@ -4,6 +4,7 @@ import DeleteEventButton from "@/components/DeleteEventButton";
 import { listEventCards } from "@/lib/events";
 import { isAuthRequired, isSetupUnlocked } from "@/lib/auth";
 import { EXERCISE_LABELS, type ExerciseType } from "@/lib/types";
+import { formatOccurredOn } from "@/lib/analysis";
 
 export const dynamic = "force-dynamic";
 
@@ -87,6 +88,16 @@ export default async function HomePage() {
                   ))}
                 </select>
               </label>
+              <label className="flex flex-col gap-1">
+                <span className="text-xs font-medium uppercase tracking-wide text-forest-600">
+                  Date
+                </span>
+                <input
+                  type="date"
+                  name="occurred_on"
+                  className="rounded-lg border border-forest-200 bg-white px-3 py-2"
+                />
+              </label>
               <button
                 type="submit"
                 className="rounded-lg bg-forest-700 text-white px-5 py-2.5 font-medium hover:bg-forest-800 transition"
@@ -148,7 +159,7 @@ export default async function HomePage() {
                               courses.length === 1 ? "" : "s"
                             }`
                           : ""}{" "}
-                        · {new Date(e.created_at).toLocaleString()}
+                        · {formatOccurredOn(e.occurred_on) || new Date(e.created_at).toLocaleString()}
                       </p>
                       {e.description ? (
                         <p className="text-sm text-forest-700 mt-1 line-clamp-2">

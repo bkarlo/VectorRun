@@ -128,6 +128,44 @@ function migrate(database: Database.Database) {
       `ALTER TABLE events ADD COLUMN control_symbol_scale REAL NOT NULL DEFAULT 0.7`
     );
   }
+  if (!eventCols.has("occurred_on")) {
+    database.exec(
+      `ALTER TABLE events ADD COLUMN occurred_on TEXT NOT NULL DEFAULT ''`
+    );
+    database.exec(
+      `UPDATE events SET occurred_on = substr(created_at, 1, 10) WHERE occurred_on = ''`
+    );
+  }
+  if (!eventCols.has("show_course_line")) {
+    database.exec(
+      `ALTER TABLE events ADD COLUMN show_course_line INTEGER NOT NULL DEFAULT 1`
+    );
+  }
+  if (!eventCols.has("course_line_weight")) {
+    database.exec(
+      `ALTER TABLE events ADD COLUMN course_line_weight REAL NOT NULL DEFAULT 2`
+    );
+  }
+  if (!eventCols.has("control_stroke_scale")) {
+    database.exec(
+      `ALTER TABLE events ADD COLUMN control_stroke_scale REAL NOT NULL DEFAULT 1`
+    );
+  }
+  if (!eventCols.has("runner_marker_scale")) {
+    database.exec(
+      `ALTER TABLE events ADD COLUMN runner_marker_scale REAL NOT NULL DEFAULT 1`
+    );
+  }
+  if (!eventCols.has("track_weight")) {
+    database.exec(
+      `ALTER TABLE events ADD COLUMN track_weight REAL NOT NULL DEFAULT 3`
+    );
+  }
+  if (!eventCols.has("trail_tail_ms")) {
+    database.exec(
+      `ALTER TABLE events ADD COLUMN trail_tail_ms INTEGER NOT NULL DEFAULT 0`
+    );
+  }
 
   const partCols = tableColumns(database, "participants");
   if (!partCols.has("sync_strategy")) {
@@ -151,7 +189,7 @@ function migrate(database: Database.Database) {
   const mapCols = tableColumns(database, "maps");
   if (!mapCols.has("opacity")) {
     database.exec(
-      `ALTER TABLE maps ADD COLUMN opacity REAL NOT NULL DEFAULT 0.55`
+      `ALTER TABLE maps ADD COLUMN opacity REAL NOT NULL DEFAULT 1`
     );
   }
 

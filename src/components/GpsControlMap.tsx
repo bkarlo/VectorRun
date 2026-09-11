@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   MapContainer,
   Marker,
@@ -15,6 +15,7 @@ import type { GeorefPair, TrackPoint } from "@/lib/types";
 import { fitAffine, mapToGps } from "@/lib/georef";
 import { DEFAULT_MAP_CENTER_TUPLE } from "@/lib/geoDefaults";
 import { trackTouchesControl } from "@/lib/sync";
+import { MAP_MAX_ZOOM, pinHtml, PIN_H, PIN_W } from "@/lib/mapPins";
 import RotatedImageOverlay from "./RotatedImageOverlay";
 import BasemapTiles, { type BasemapKind } from "./BasemapTiles";
 
@@ -37,6 +38,7 @@ interface Props {
   tracks?: GpsTrackLayer[];
   selectedSequence?: number;
   onPlace: (lat: number, lon: number) => void;
+  onMove?: (sequence: number, lat: number, lon: number) => void;
   center?: [number, number];
   /** Georeferenced orienteering map (shown under tracks) */
   mapUrl?: string | null;
@@ -78,7 +80,7 @@ function FitView({
       map.setView(pts[0], 15);
       return;
     }
-    map.fitBounds(L.latLngBounds(pts), { padding: [40, 40] });
+    map.fitBounds(L.latLngBounds(pts), { padding: [40, 40], maxZoom: 20 });
   }, [map, controls, tracks]);
   return null;
 }
@@ -88,29 +90,15 @@ function controlPinIcon(
   selected: boolean,
   color: string
 ): L.DivIcon {
-  const size = selected ? 22 : 18;
   const label = code.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+  const extra = selected
+    ? `<span style="font:700 11px/1.2 ui-sans-serif,system-ui,sans-serif;color:${color};text-shadow:0 0 2px #fff,1px 0 0 #fff,-1px 0 0 #fff">${label}</span>`
+    : `<span style="font:600 11px/1.2 ui-sans-serif,system-ui,sans-serif;color:${color};text-shadow:0 0 2px #fff,1px 0 0 #fff,-1px 0 0 #fff">${label}</span>`;
   return L.divIcon({
     className: "georef-pin-icon",
-    html: `<div style="width:${size}px;height:${size + 12}px;position:relative;">
-      <div style="
-        position:absolute;left:1px;top:0;
-        width:${size - 2}px;height:${size - 2}px;border-radius:50% 50% 50% 0;
-        background:${color};
-        border:2px solid #fff;
-        box-shadow:0 1px 3px rgba(0,0,0,.35);
-        transform:rotate(-45deg);
-      "></div>
-      <div style="
-        position:absolute;left:${size + 4}px;top:0;
-        font:700 11px/1.2 ui-sans-serif,system-ui,sans-serif;
-        color:${color};
-        text-shadow:0 0 2px #fff,1px 0 0 #fff,-1px 0 0 #fff,0 1px 0 #fff,0 -1px 0 #fff;
-        white-space:nowrap;
-      ">${label}</div>
-    </div>`,
-    iconSize: [size, size + 12],
-    iconAnchor: [size / 2, size + 8],
+    html: pinHtml(color, undefined, extra),
+    iconSize: [PIN_W + Math.max(18, label.length * 8), PIN_H],
+    iconAnchor: [PIN_W / 2, PIN_H],
   });
 }
 
@@ -119,12 +107,13 @@ export default function GpsControlMap({
   tracks = [],
   selectedSequence,
   onPlace,
+  onMove,
   center = DEFAULT_MAP_CENTER_TUPLE,
   mapUrl = null,
   mapWidth = 0,
   mapHeight = 0,
   georef = [],
-  mapOpacity = 0.55,
+  mapOpacity = 1,
 }: Props) {
   const touchByControl = useMemo(() => {
     const out = new Map<
@@ -174,6 +163,7 @@ export default function GpsControlMap({
     <MapContainer
       center={center}
       zoom={14}
+      maxZoom={MAP_MAX_ZOOM}
       className="h-full w-full min-h-[420px] cursor-crosshair"
       zoomControl
     >
@@ -206,20 +196,26 @@ export default function GpsControlMap({
         const noneHit = touch && touch.total > 0 && touch.hit === 0;
         const color = noneHit ? "#b45309" : allHit ? "#15803d" : "#c0392b";
         return (
-          <Marker
+          <DraggableGpsMarker
             key={`${c.sequence}-${c.code}`}
-            position={[c.lat, c.lon]}
+            lat={c.lat}
+            lon={c.lon}
             icon={controlPinIcon(c.code || "?", selected, color)}
-            interactive={false}
+            draggable={!!onMove}
+            onCommit={
+              onMove
+                ? (lat, lon) => onMove(c.sequence, lat, lon)
+                : undefined
+            }
           >
             {touch && touch.total > 0 ? (
-              <Tooltip permanent direction="right" offset={[10, -8]}>
+              <Tooltip permanent direction="right" offset={[PIN_W / 2 + 4, -PIN_H / 2]}>
                 <span className="opacity-80">
                   {touch.hit}/{touch.total}
                 </span>
               </Tooltip>
             ) : null}
-          </Marker>
+          </DraggableGpsMarker>
         );
       })}
     </MapContainer>
@@ -244,5 +240,56 @@ export default function GpsControlMap({
         </button>
       </div>
     </div>
+  );
+}
+
+function DraggableGpsMarker({
+  lat,
+  lon,
+  icon,
+  draggable,
+  onCommit,
+  children,
+}: {
+  lat: number;
+  lon: number;
+  icon: L.DivIcon;
+  draggable: boolean;
+  onCommit?: (lat: number, lon: number) => void;
+  children?: ReactNode;
+}) {
+  const draggingRef = useRef(false);
+  const [pos, setPos] = useState<[number, number]>([lat, lon]);
+
+  useEffect(() => {
+    if (!draggingRef.current) {
+      setPos([lat, lon]);
+    }
+  }, [lat, lon]);
+
+  return (
+    <Marker
+      position={pos}
+      icon={icon}
+      draggable={draggable}
+      autoPan={draggable}
+      eventHandlers={
+        draggable && onCommit
+          ? {
+              dragstart() {
+                draggingRef.current = true;
+              },
+              dragend(e) {
+                const ll = e.target.getLatLng();
+                draggingRef.current = false;
+                setPos([ll.lat, ll.lng]);
+                onCommit(ll.lat, ll.lng);
+              },
+            }
+          : undefined
+      }
+    >
+      {children}
+    </Marker>
   );
 }

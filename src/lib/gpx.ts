@@ -158,6 +158,42 @@ export function interpolateAtTime(
 
 /** Points at or before t, ending at the interpolated position at t (for trail reveal). */
 /** Nearest sample to `timeMs` at or after `fromIndex` (monotonic tracks). */
+/** Keep samples whose time is inside [fromTimeMs, toTimeMs] (inclusive). */
+export function trimTrackPoints(
+  points: TrackPoint[],
+  fromTimeMs: number,
+  toTimeMs: number
+): TrackPoint[] {
+  if (points.length === 0) return [];
+  const lo = Math.min(fromTimeMs, toTimeMs);
+  const hi = Math.max(fromTimeMs, toTimeMs);
+  const kept = points.filter(
+    (p) => p.time >= lo && p.time <= hi
+  );
+  if (kept.length >= 2) return kept;
+  if (kept.length === 1) {
+    const i = points.indexOf(kept[0]);
+    const neighbor = i + 1 < points.length ? points[i + 1] : points[i - 1];
+    return neighbor ? [kept[0], neighbor] : kept;
+  }
+  return points.slice(0, Math.min(2, points.length));
+}
+
+/** Trim by fraction of the track's time span (0–1). */
+export function trimTrackByFraction(
+  points: TrackPoint[],
+  startFrac: number,
+  endFrac: number
+): TrackPoint[] {
+  if (points.length < 2) return points.slice();
+  const t0 = points[0].time;
+  const t1 = points[points.length - 1].time;
+  const span = Math.max(1, t1 - t0);
+  const a = Math.min(1, Math.max(0, startFrac));
+  const b = Math.min(1, Math.max(0, endFrac));
+  return trimTrackPoints(points, t0 + span * a, t0 + span * b);
+}
+
 export function indexNearestTime(
   points: TrackPoint[],
   timeMs: number,

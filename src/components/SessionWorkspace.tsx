@@ -46,6 +46,7 @@ import {
   actionSetReference,
   actionSetRunnerDelta,
   actionSetRunnerSyncStrategy,
+  actionTrimRunnerTrack,
 } from "@/app/actions";
 import dynamic from "next/dynamic";
 import SpeedChart from "./SpeedChart";
@@ -57,6 +58,56 @@ import {
 } from "@/lib/trackRepair";
 
 const SessionMap = dynamic(() => import("./SessionMap"), { ssr: false });
+
+const PLAYBACK_SPEED_MIN = 1;
+const PLAYBACK_SPEED_MAX = 300;
+
+function speedToSlider(speed: number): number {
+  const s = Math.min(PLAYBACK_SPEED_MAX, Math.max(PLAYBACK_SPEED_MIN, speed));
+  return (
+    Math.log(s / PLAYBACK_SPEED_MIN) /
+    Math.log(PLAYBACK_SPEED_MAX / PLAYBACK_SPEED_MIN)
+  );
+}
+
+function sliderToSpeed(t: number): number {
+  const raw =
+    PLAYBACK_SPEED_MIN *
+    Math.pow(
+      PLAYBACK_SPEED_MAX / PLAYBACK_SPEED_MIN,
+      Math.min(1, Math.max(0, t))
+    );
+  return Math.max(1, Math.round(raw));
+}
+
+function PlaybackSpeedSlider({
+  value,
+  onChange,
+}: {
+  value: number;
+  onChange: (n: number) => void;
+}) {
+  return (
+    <label className="flex items-center gap-1.5 text-sm text-forest-700 min-w-0">
+      <span className="text-[10px] uppercase tracking-wide text-forest-500 hidden sm:inline">
+        Speed
+      </span>
+      <input
+        type="range"
+        min={0}
+        max={1000}
+        step={1}
+        value={Math.round(speedToSlider(value) * 1000)}
+        onChange={(e) => onChange(sliderToSpeed(Number(e.target.value) / 1000))}
+        className="w-24 sm:w-32 accent-forest-700"
+        aria-label="Playback speed"
+      />
+      <span className="font-mono text-xs tabular-nums w-10 shrink-0">
+        {value}×
+      </span>
+    </label>
+  );
+}
 
 type FillLegRow = { controlId: string; paceMinPerKm: string };
 export interface SessionTrack {
@@ -125,9 +176,24 @@ export default function SessionWorkspace({
   const [controlSymbolScale, setControlSymbolScale] = useState(
     event.control_symbol_scale ?? 0.7
   );
+  const [showCourseLine, setShowCourseLine] = useState(
+    event.show_course_line !== false
+  );
+  const [courseLineWeight, setCourseLineWeight] = useState(
+    event.course_line_weight ?? 2
+  );
+  const [controlStrokeScale, setControlStrokeScale] = useState(
+    event.control_stroke_scale ?? 1
+  );
+  const [runnerMarkerScale, setRunnerMarkerScale] = useState(
+    event.runner_marker_scale ?? 1
+  );
+  const [trackWeight, setTrackWeight] = useState(event.track_weight ?? 3);
+  const [trailTailMs, setTrailTailMs] = useState(event.trail_tail_ms ?? 0);
+  const [trimStart, setTrimStart] = useState(0);
+  const [trimEnd, setTrimEnd] = useState(1);
   const appendInputRef = useRef<HTMLInputElement>(null);
   const playRef = useRef<number | null>(null);
-  const PLAYBACK_SPEEDS = [1, 2, 5, 10, 30, 60, 120, 300] as const;
 
   const activeCourse =
     coursePhases[
@@ -484,6 +550,11 @@ export default function SessionWorkspace({
     return initialTracks.find((t) => t.participant.id === id) ?? null;
   }, [repairTargetId, initialTracks]);
 
+  useEffect(() => {
+    setTrimStart(0);
+    setTrimEnd(1);
+  }, [repairTarget?.participant.id]);
+
   const suggestedPaceMinPerKm = useMemo(() => {
     if (!repairTarget || repairTarget.points.length < 2) return "6.5";
     const pace = mpsToPaceMinPerKm(averageSpeedMps(repairTarget.points));
@@ -602,6 +673,31 @@ export default function SessionWorkspace({
       return;
     }
     setRepairStatus(`Filled (${res.pointCount} pts) — refreshing…`);
+    window.location.reload();
+  };
+
+  const onTrimTrack = async () => {
+    if (!repairTarget) return;
+    const a = Math.min(trimStart, trimEnd);
+    const b = Math.max(trimStart, trimEnd);
+    if (b - a < 0.02) {
+      setRepairStatus("Keep a longer slice of the track");
+      return;
+    }
+    setRepairBusy(true);
+    setRepairStatus("Trimming…");
+    const res = await actionTrimRunnerTrack(
+      event.id,
+      repairTarget.participant.id,
+      a,
+      b
+    );
+    if (!res.ok) {
+      setRepairStatus(res.error);
+      setRepairBusy(false);
+      return;
+    }
+    setRepairStatus(`Trimmed (${res.pointCount} pts) — refreshing…`);
     window.location.reload();
   };
 
@@ -926,6 +1022,15 @@ export default function SessionWorkspace({
     showBasemap,
     showControlSymbols,
     controlSymbolScale,
+    controlStrokeScale,
+    showCourseLine,
+    courseLineWeight,
+    courseLine: courseCtrlPoints.map(
+      (p) => [p.lat, p.lon] as [number, number]
+    ),
+    runnerMarkerScale,
+    trackWeight,
+    trailTailMs,
     punchRadiusM: event.punch_radius_m,
     onTrackClick:
       canSetup && punchEditId && punchEditCode ? handleMapPunchClick : undefined,
@@ -1043,12 +1148,13 @@ export default function SessionWorkspace({
               return (
                 <li
                   key={t.participant.id}
-                  className={`flex items-center gap-1 rounded-lg border px-1.5 py-1 group min-w-0 ${
+                  className={`flex flex-col gap-1 rounded-lg border px-1.5 py-1.5 group min-w-0 ${
                     isRef
                       ? "border-forest-400 bg-forest-50/80"
                       : "border-forest-200 bg-white/80"
                   }`}
                 >
+                  <div className="flex items-center gap-1 min-w-0">
                   <form action={actionSetReference} className="shrink-0">
                     <input type="hidden" name="event_id" value={event.id} />
                     <input
@@ -1116,6 +1222,9 @@ export default function SessionWorkspace({
                       aria-label="Runner name"
                     />
                   </form>
+                  </div>
+
+                  <div className="flex items-center gap-1 min-w-0 flex-wrap">
 
                   {isRef ? (
                     <span
@@ -1302,6 +1411,7 @@ export default function SessionWorkspace({
                     </button>
                   </form>
                   ) : null}
+                  </div>
                 </li>
               );
             })}
@@ -1491,6 +1601,76 @@ export default function SessionWorkspace({
                         ))}
                     </select>
                   </label>
+
+                  {repairTarget && repairTarget.points.length >= 2 ? (
+                    <div className="rounded-md border border-forest-100 bg-forest-50/60 p-2 space-y-1.5">
+                      <p className="text-[10px] uppercase tracking-wide text-forest-600">
+                        Trim start / end
+                      </p>
+                      <label className="block text-xs text-forest-700 space-y-0.5">
+                        <span className="flex justify-between gap-2">
+                          <span>Keep from</span>
+                          <span className="font-mono text-[10px] tabular-nums">
+                            {formatWallTime(
+                              repairTarget.points[0].time +
+                                (repairTarget.points[
+                                  repairTarget.points.length - 1
+                                ].time -
+                                  repairTarget.points[0].time) *
+                                  Math.min(trimStart, trimEnd)
+                            )}
+                          </span>
+                        </span>
+                        <input
+                          type="range"
+                          min={0}
+                          max={1000}
+                          step={1}
+                          value={Math.round(trimStart * 1000)}
+                          onChange={(e) =>
+                            setTrimStart(Number(e.target.value) / 1000)
+                          }
+                          className="w-full accent-forest-700"
+                          aria-label="Trim start"
+                        />
+                      </label>
+                      <label className="block text-xs text-forest-700 space-y-0.5">
+                        <span className="flex justify-between gap-2">
+                          <span>Keep until</span>
+                          <span className="font-mono text-[10px] tabular-nums">
+                            {formatWallTime(
+                              repairTarget.points[0].time +
+                                (repairTarget.points[
+                                  repairTarget.points.length - 1
+                                ].time -
+                                  repairTarget.points[0].time) *
+                                  Math.max(trimStart, trimEnd)
+                            )}
+                          </span>
+                        </span>
+                        <input
+                          type="range"
+                          min={0}
+                          max={1000}
+                          step={1}
+                          value={Math.round(trimEnd * 1000)}
+                          onChange={(e) =>
+                            setTrimEnd(Number(e.target.value) / 1000)
+                          }
+                          className="w-full accent-forest-700"
+                          aria-label="Trim end"
+                        />
+                      </label>
+                      <button
+                        type="button"
+                        disabled={repairBusy}
+                        onClick={() => void onTrimTrack()}
+                        className="w-full rounded-md bg-forest-700 text-white px-2 py-1.5 text-sm font-medium disabled:opacity-50"
+                      >
+                        Apply trim
+                      </button>
+                    </div>
+                  ) : null}
 
                   <div className="flex flex-col gap-1.5">
                     <button
@@ -1761,7 +1941,7 @@ export default function SessionWorkspace({
               raceWindow={raceTimeRange}
               trailReveal={event.playback_trail_enabled !== false}
               resizeToken={`${mobileTab}-${mapFullscreen}`}
-              mapOpacity={map?.opacity ?? 0.55}
+              mapOpacity={map?.opacity ?? 1}
               fillPreview={fillPreview}
               {...sessionMapExtras}
             />
@@ -1792,21 +1972,105 @@ export default function SessionWorkspace({
                   Control circles
                 </label>
                 {showControlSymbols ? (
-                  <label className="flex items-center gap-1.5">
-                    Size
-                    <input
-                      type="range"
-                      min={0.4}
-                      max={1.4}
-                      step={0.05}
-                      value={controlSymbolScale}
-                      onChange={(e) =>
-                        setControlSymbolScale(parseFloat(e.target.value))
-                      }
-                      className="w-16"
-                    />
-                  </label>
+                  <>
+                    <label className="flex items-center gap-1.5">
+                      Size
+                      <input
+                        type="range"
+                        min={0.4}
+                        max={1.4}
+                        step={0.05}
+                        value={controlSymbolScale}
+                        onChange={(e) =>
+                          setControlSymbolScale(parseFloat(e.target.value))
+                        }
+                        className="w-16"
+                      />
+                    </label>
+                    <label className="flex items-center gap-1.5">
+                      Stroke
+                      <input
+                        type="range"
+                        min={0.4}
+                        max={2.5}
+                        step={0.05}
+                        value={controlStrokeScale}
+                        onChange={(e) =>
+                          setControlStrokeScale(parseFloat(e.target.value))
+                        }
+                        className="w-16"
+                      />
+                    </label>
+                    <label className="flex items-center gap-1.5 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={showCourseLine}
+                        onChange={(e) => setShowCourseLine(e.target.checked)}
+                      />
+                      Course line
+                    </label>
+                    {showCourseLine ? (
+                      <label className="flex items-center gap-1.5">
+                        Line
+                        <input
+                          type="range"
+                          min={0.5}
+                          max={6}
+                          step={0.25}
+                          value={courseLineWeight}
+                          onChange={(e) =>
+                            setCourseLineWeight(parseFloat(e.target.value))
+                          }
+                          className="w-16"
+                        />
+                      </label>
+                    ) : null}
+                  </>
                 ) : null}
+                <label className="flex items-center gap-1.5">
+                  Blob
+                  <input
+                    type="range"
+                    min={0.5}
+                    max={2}
+                    step={0.05}
+                    value={runnerMarkerScale}
+                    onChange={(e) =>
+                      setRunnerMarkerScale(parseFloat(e.target.value))
+                    }
+                    className="w-16"
+                  />
+                </label>
+                <label className="flex items-center gap-1.5">
+                  Track
+                  <input
+                    type="range"
+                    min={1}
+                    max={8}
+                    step={0.25}
+                    value={trackWeight}
+                    onChange={(e) => setTrackWeight(parseFloat(e.target.value))}
+                    className="w-16"
+                  />
+                </label>
+                <label className="flex items-center gap-1.5">
+                  Tail
+                  <input
+                    type="range"
+                    min={0}
+                    max={180}
+                    step={5}
+                    value={Math.round(trailTailMs / 1000)}
+                    onChange={(e) =>
+                      setTrailTailMs(parseInt(e.target.value, 10) * 1000)
+                    }
+                    className="w-16"
+                    title="Fade the trail after N seconds (0 = keep full path)"
+                  />
+                  <span className="font-mono text-[10px] w-8">
+                    {trailTailMs <= 0 ? "all" : `${Math.round(trailTailMs / 1000)}s`}
+                  </span>
+                </label>
                 {canSetup ? (
                   <button
                     type="button"
@@ -1816,6 +2080,12 @@ export default function SessionWorkspace({
                         show_basemap: showBasemap,
                         show_control_symbols: showControlSymbols,
                         control_symbol_scale: controlSymbolScale,
+                        show_course_line: showCourseLine,
+                        course_line_weight: courseLineWeight,
+                        control_stroke_scale: controlStrokeScale,
+                        runner_marker_scale: runnerMarkerScale,
+                        track_weight: trackWeight,
+                        trail_tail_ms: trailTailMs,
                       })
                     }
                   >
@@ -1835,23 +2105,10 @@ export default function SessionWorkspace({
               >
                 {playing ? "Pause" : "Play"}
               </button>
-              <label className="flex items-center gap-1.5 text-sm text-forest-700">
-                <span className="text-[10px] uppercase tracking-wide text-forest-500 hidden sm:inline">
-                  Speed
-                </span>
-                <select
-                  value={playbackSpeed}
-                  onChange={(e) => setPlaybackSpeed(Number(e.target.value))}
-                  className="rounded-lg border border-forest-200 bg-white px-2 py-1.5 text-sm font-mono"
-                  aria-label="Playback speed"
-                >
-                  {PLAYBACK_SPEEDS.map((s) => (
-                    <option key={s} value={s}>
-                      {s}×
-                    </option>
-                  ))}
-                </select>
-              </label>
+              <PlaybackSpeedSlider
+                value={playbackSpeed}
+                onChange={setPlaybackSpeed}
+              />
               <label className="flex items-center gap-1.5 text-sm text-forest-700">
                 <span className="text-[10px] uppercase tracking-wide text-forest-500 hidden sm:inline">
                   Follow
@@ -1974,7 +2231,7 @@ export default function SessionWorkspace({
                   raceWindow={raceTimeRange}
                   trailReveal={event.playback_trail_enabled !== false}
                   resizeToken={`splits-${mobileTab}-${analysisIndex}`}
-                  mapOpacity={map?.opacity ?? 0.55}
+                  mapOpacity={map?.opacity ?? 1}
                   fillPreview={fillPreview}
               {...sessionMapExtras}
                 />
@@ -1988,18 +2245,10 @@ export default function SessionWorkspace({
                   >
                     {playing ? "Pause" : "Play"}
                   </button>
-                  <select
+                  <PlaybackSpeedSlider
                     value={playbackSpeed}
-                    onChange={(e) => setPlaybackSpeed(Number(e.target.value))}
-                    className="rounded-lg border border-forest-200 bg-white px-2 py-1.5 text-sm font-mono"
-                    aria-label="Playback speed"
-                  >
-                    {PLAYBACK_SPEEDS.map((s) => (
-                      <option key={s} value={s}>
-                        {s}×
-                      </option>
-                    ))}
-                  </select>
+                    onChange={setPlaybackSpeed}
+                  />
                   <span className="font-mono text-xs text-forest-800 tabular-nums">
                     {formatSplitTime(relMs)}
                     <span className="text-forest-400"> / </span>
@@ -2271,7 +2520,7 @@ export default function SessionWorkspace({
               raceWindow={raceTimeRange}
               trailReveal={event.playback_trail_enabled !== false}
               resizeToken={`fs-${mapFullscreen}`}
-              mapOpacity={map?.opacity ?? 0.55}
+              mapOpacity={map?.opacity ?? 1}
               fillPreview={fillPreview}
               {...sessionMapExtras}
             />
@@ -2292,18 +2541,10 @@ export default function SessionWorkspace({
               >
                 {playing ? "Pause" : "Play"}
               </button>
-              <select
+              <PlaybackSpeedSlider
                 value={playbackSpeed}
-                onChange={(e) => setPlaybackSpeed(Number(e.target.value))}
-                className="rounded-lg border border-forest-200 bg-white px-2 py-2 text-sm font-mono"
-                aria-label="Playback speed"
-              >
-                {PLAYBACK_SPEEDS.map((s) => (
-                  <option key={s} value={s}>
-                    {s}×
-                  </option>
-                ))}
-              </select>
+                onChange={setPlaybackSpeed}
+              />
               <select
                 value={followRunnerId}
                 onChange={(e) => setFollowRunnerId(e.target.value)}
