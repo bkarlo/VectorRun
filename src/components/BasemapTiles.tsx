@@ -1,6 +1,7 @@
 "use client";
 
 import { TileLayer } from "react-leaflet";
+import { MAP_MAX_ZOOM, MAP_NATIVE_ZOOM } from "@/lib/mapPins";
 
 export type BasemapKind = "osm" | "satellite";
 
@@ -24,8 +25,22 @@ export default function BasemapTiles({
   if (!visible) return null;
   if (kind === "satellite") {
     return (
-      <TileLayer attribution={SAT_ATTR} url={SAT_URL} opacity={opacity} />
+      <TileLayer
+        attribution={SAT_ATTR}
+        url={SAT_URL}
+        opacity={opacity}
+        maxNativeZoom={MAP_NATIVE_ZOOM}
+        maxZoom={MAP_MAX_ZOOM}
+      />
     );
   }
-  return <TileLayer attribution={OSM_ATTR} url={OSM_URL} opacity={opacity} />;
+  return (
+    <TileLayer
+      attribution={OSM_ATTR}
+      url={OSM_URL}
+      opacity={opacity}
+      maxNativeZoom={MAP_NATIVE_ZOOM}
+      maxZoom={MAP_MAX_ZOOM}
+    />
+  );
 }

@@ -24,6 +24,7 @@ import {
   leadPoint,
   panExceedsEpsilon,
 } from "@/lib/followCamera";
+import { MAP_MAX_ZOOM } from "@/lib/mapPins";
 import RotatedImageOverlay from "./RotatedImageOverlay";
 import BasemapTiles, { type BasemapKind } from "./BasemapTiles";
 
@@ -51,10 +52,11 @@ function escapeHtml(s: string): string {
 function controlSymbolIcon(
   code: string,
   radiusPx: number,
-  hot: boolean
+  hot: boolean,
+  strokeScale = 1
 ): L.DivIcon {
   const r = Math.max(3, radiusPx);
-  const stroke = Math.max(1.25, Math.min(3.2, r * 0.16));
+  const stroke = Math.max(1.1, Math.min(5, r * 0.16 * strokeScale));
   const font = Math.max(8, Math.min(17, r * 0.9));
   const gap = Math.max(3, r * 0.22);
   const labelW = Math.ceil(font * Math.max(1.1, code.length * 0.62));
@@ -115,10 +117,12 @@ function ControlSymbols({
   controls,
   hotIds,
   scale = 0.7,
+  strokeScale = 1,
 }: {
   controls: ControlRow[];
   hotIds: Set<string>;
   scale?: number;
+  strokeScale?: number;
 }) {
   const map = useMap();
   const zoom = useMapZoom();
@@ -155,7 +159,8 @@ function ControlSymbols({
           const icon = controlSymbolIcon(
             c.code,
             radiusPx,
-            hotIds.has(c.id)
+            hotIds.has(c.id),
+            strokeScale
           );
           return (
             <Marker
@@ -225,14 +230,18 @@ function runnerInitials(name: string): string {
   return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
 }
 
-function runnerAvatarIcon(name: string, color: string): L.DivIcon {
+function runnerAvatarIcon(
+  name: string,
+  color: string,
+  scale = 1
+): L.DivIcon {
   const initials = runnerInitials(name)
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
   const safeColor = color.replace(/[^#a-fA-F0-9(),.\s%]/g, "");
-  const size = 32;
+  const size = Math.round(32 * Math.min(2, Math.max(0.5, scale)));
   return L.divIcon({
     className: "runner-avatar-icon",
     html: `<div style="
@@ -241,7 +250,7 @@ function runnerAvatarIcon(name: string, color: string): L.DivIcon {
       border:2.5px solid ${safeColor};
       box-shadow:0 1px 4px rgba(0,0,0,.28), 0 0 0 1px rgba(255,255,255,.6);
       display:flex;align-items:center;justify-content:center;
-      font:700 11px/1 ui-sans-serif,system-ui,sans-serif;
+      font:700 ${Math.max(9, Math.round(size * 0.34))}px/1 ui-sans-serif,system-ui,sans-serif;
       color:${safeColor};
       letter-spacing:-0.02em;
       user-select:none;
@@ -311,6 +320,13 @@ interface Props {
   showBasemap?: boolean;
   showControlSymbols?: boolean;
   controlSymbolScale?: number;
+  controlStrokeScale?: number;
+  showCourseLine?: boolean;
+  courseLineWeight?: number;
+  courseLine?: [number, number][];
+  runnerMarkerScale?: number;
+  trackWeight?: number;
+  trailTailMs?: number;
   punchRadiusM?: number;
   /** When set, clicking the map reports lat/lon (punch override). */
   onTrackClick?: (lat: number, lon: number) => void;
@@ -338,7 +354,7 @@ function FitBounds({
   const done = useRef(false);
   useEffect(() => {
     if (done.current) return;
-    map.fitBounds(bounds, { padding: [24, 24] });
+    map.fitBounds(bounds, { padding: [24, 24], maxZoom: 20 });
     done.current = true;
   }, [map, bounds]);
   return null;
@@ -360,7 +376,7 @@ function FocusBounds({
     lastKey.current = key;
     map.fitBounds(bounds, {
       padding: [56, 56],
-      maxZoom: 16,
+      maxZoom: 20,
       animate: true,
       duration: 0.85,
     });
@@ -578,11 +594,18 @@ export default function SessionMap({
   followPack = false,
   followPlaying = false,
   resizeToken,
-  mapOpacity = 0.55,
+  mapOpacity = 1,
   fillPreview = null,
   showBasemap = true,
   showControlSymbols = true,
   controlSymbolScale = 0.7,
+  controlStrokeScale = 1,
+  showCourseLine = true,
+  courseLineWeight = 2,
+  courseLine = [],
+  runnerMarkerScale = 1,
+  trackWeight = 3,
+  trailTailMs = 0,
   punchRadiusM,
   onTrackClick,
 }: Props) {
@@ -664,6 +687,7 @@ export default function SessionMap({
         (bounds[0][1] + bounds[1][1]) / 2,
       ]}
       zoom={14}
+      maxZoom={MAP_MAX_ZOOM}
       className="h-full w-full"
       zoomControl
     >
@@ -698,6 +722,19 @@ export default function SessionMap({
           controls={controls}
           hotIds={hotControlIds}
           scale={controlSymbolScale}
+          strokeScale={controlStrokeScale}
+        />
+      ) : null}
+
+      {showControlSymbols && showCourseLine && courseLine.length >= 2 ? (
+        <Polyline
+          positions={courseLine}
+          pathOptions={{
+            color: CONTROL_COLOR,
+            weight: courseLineWeight,
+            opacity: 0.85,
+            dashArray: "6 8",
+          }}
         />
       ) : null}
 
@@ -707,32 +744,39 @@ export default function SessionMap({
       {/* Full tracks — with trail reveal, always keep the entire past path visible
           even when a leg is highlighted / follow advances to the next leg. */}
       {tracks.map((t) => {
-        const source = trailReveal
+        let source = trailReveal
           ? trackUpToTime(t.points, replayMs)
           : t.points;
+        if (trailTailMs > 0) {
+          const t0 = replayMs - trailTailMs;
+          source = source.filter((p) => p.time >= t0 && p.time <= replayMs);
+        }
         if (source.length < 2) return null;
 
-        if (useRaceSplit && raceWindow && !trailReveal) {
+        const w = trackWeight;
+        const wDim = Math.max(1, w * 0.65);
+
+        if (useRaceSplit && raceWindow && !trailReveal && trailTailMs <= 0) {
           const { before, during, after } = splitTrackByTimeWindow(
             source,
             raceWindow
           );
           const raceOpacity = dimRace ? 0.28 : 0.95;
-          const raceWeight = dimRace ? 2 : 3;
+          const raceWeight = dimRace ? wDim : w;
           const segs: {
             key: string;
             pts: TrackPoint[];
             opacity: number;
             weight: number;
           }[] = [
-            { key: "before", pts: before, opacity: 0.14, weight: 2 },
+            { key: "before", pts: before, opacity: 0.14, weight: wDim },
             {
               key: "during",
               pts: during,
               opacity: raceOpacity,
               weight: raceWeight,
             },
-            { key: "after", pts: after, opacity: 0.14, weight: 2 },
+            { key: "after", pts: after, opacity: 0.14, weight: wDim },
           ];
           return segs.map((seg) => {
             if (seg.pts.length < 2) return null;
@@ -771,7 +815,7 @@ export default function SessionMap({
             pathOptions={{
               color: t.color,
               // Trail reveal: past stays fully visible; without it, dim under leg highlight
-              weight: trailReveal ? 3 : dimRace ? 2 : 3,
+              weight: trailReveal ? w : dimRace ? wDim : w,
               opacity: trailReveal ? 0.9 : dimRace ? 0.28 : 1,
             }}
           />
@@ -789,7 +833,7 @@ export default function SessionMap({
             positions={latlngs}
             pathOptions={{
               color: t.color,
-              weight: 4,
+              weight: Math.max(2, trackWeight + 1),
               opacity: 0.95,
             }}
           />
@@ -814,10 +858,11 @@ export default function SessionMap({
       {tracks.map((t) => {
         const pos = interpolateAtTime(t.points, replayMs);
         if (!pos) return null;
-        const icon = runnerAvatarIcon(t.name, t.color);
+        const icon = runnerAvatarIcon(t.name, t.color, runnerMarkerScale);
+        const tip = Math.round(16 * Math.min(2, Math.max(0.5, runnerMarkerScale)));
         return (
           <Marker key={`av-${t.id}`} position={[pos.lat, pos.lon]} icon={icon} zIndexOffset={800}>
-            <Tooltip direction="top" offset={[0, -16]}>
+            <Tooltip direction="top" offset={[0, -tip]}>
               {t.name}
             </Tooltip>
           </Marker>

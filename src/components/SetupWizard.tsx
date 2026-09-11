@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
 import dynamic from "next/dynamic";
 import Link from "next/link";
 import type { DayPhaseKind, GeorefPair, TrackPoint } from "@/lib/types";
@@ -11,6 +11,7 @@ import {
   validateCourseDef,
 } from "@/lib/courseDef";
 import CourseChainEditor from "./CourseChainEditor";
+import HtmlMapPin from "./HtmlMapPin";
 import {
   actionSaveGeoref,
   actionSaveControls,
@@ -115,7 +116,7 @@ export default function SetupWizard(props: Props) {
   const [focusCodeIndex, setFocusCodeIndex] = useState<number | null>(null);
   const [gpxStatus, setGpxStatus] = useState("");
   const [sessionMapOpacity, setSessionMapOpacity] = useState(
-    props.initialMapOpacity ?? 0.55
+    props.initialMapOpacity ?? 1
   );
   const [opacityStatus, setOpacityStatus] = useState("");
   const [raceWindowEnabled, setRaceWindowEnabled] = useState(
@@ -242,6 +243,25 @@ export default function SetupWizard(props: Props) {
       setStatus(`Point #${list.length} placed — type its number`);
       return list;
     });
+  };
+
+  const moveControlAtGps = (sequence: number, lat: number, lon: number) => {
+    const transform = fitAffine(georef);
+    const mapPx = transform ? gpsToMap(transform, { lat, lon }) : null;
+    setControls((prev) =>
+      prev.map((c) =>
+        c.sequence === sequence
+          ? {
+              ...c,
+              lat,
+              lon,
+              map_x: mapPx?.x ?? c.map_x,
+              map_y: mapPx?.y ?? c.map_y,
+            }
+          : c
+      )
+    );
+    setStatus(`Moved point #${sequence + 1}`);
   };
 
   const onImageClick = (e: React.MouseEvent<HTMLImageElement>) => {
@@ -382,8 +402,8 @@ export default function SetupWizard(props: Props) {
           <label className="flex items-center gap-2 text-sm text-forest-700 ml-auto">
             <input
               type="range"
-              min={0.15}
-              max={0.9}
+              min={0.05}
+              max={1}
               step={0.05}
               value={sessionMapOpacity}
               onChange={(e) =>
@@ -828,6 +848,7 @@ export default function SetupWizard(props: Props) {
           <div className="panel rounded-xl overflow-hidden relative min-h-[420px] bg-forest-100">
             {mode === "points" && mapUrl ? (
               <>
+                <div className="relative w-full">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img
                   ref={imgRef}
@@ -837,22 +858,29 @@ export default function SetupWizard(props: Props) {
                   onClick={onImageClick}
                   draggable={false}
                 />
-                {mapSize.w > 0 && imgRef.current && (
+                {mapSize.w > 0 && (
                   <MapMarkers
                     georef={georef}
-                    controls={controls}
-                    mode={mode}
                     mapW={mapSize.w}
                     mapH={mapSize.h}
-                    img={imgRef.current}
+                    imgRef={imgRef}
+                    onMove={(index, x, y) => {
+                      setGeoref((prev) =>
+                        prev.map((g, i) =>
+                          i === index ? { ...g, map: { x, y } } : g
+                        )
+                      );
+                    }}
                   />
                 )}
+                </div>
               </>
             ) : mode === "controls" ? (
               <GpsControlMap
                 controls={placedGpsControls}
                 tracks={tracks}
                 onPlace={placeControlAtGps}
+                onMove={moveControlAtGps}
                 mapUrl={mapUrl}
                 mapWidth={mapSize.w}
                 mapHeight={mapSize.h}
@@ -1087,64 +1115,63 @@ function ControlList({
 
 function MapMarkers({
   georef,
-  controls,
-  mode,
   mapW,
   mapH,
-  img,
+  imgRef,
+  onMove,
 }: {
   georef: GeorefPair[];
-  controls: ControlDraft[];
-  mode: Mode;
   mapW: number;
   mapH: number;
-  img: HTMLImageElement;
+  imgRef: RefObject<HTMLImageElement | null>;
+  onMove: (index: number, x: number, y: number) => void;
 }) {
-  const rect = img.getBoundingClientRect();
-  const parent = img.parentElement?.getBoundingClientRect();
-  if (!parent) return null;
-  const scaleX = rect.width / mapW;
-  const scaleY = rect.height / mapH;
-  const offsetX = rect.left - parent.left;
-  const offsetY = rect.top - parent.top;
-
-  const dots =
-    mode === "points"
-      ? georef.map((g, i) => ({
-          key: `g${i}`,
-          x: g.map.x,
-          y: g.map.y,
-          label: String(i + 1),
-          color: "#e74c3c",
-        }))
-      : controls
-          .filter((c) => c.map_x != null && c.map_y != null)
-          .map((c) => ({
-            key: `c${c.sequence}`,
-            x: c.map_x!,
-            y: c.map_y!,
-            label: c.code || "?",
-            color: "#c0392b",
-          }));
+  const startDrag = (index: number, e: React.PointerEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const img = imgRef.current;
+    if (!img) return;
+    (e.currentTarget as HTMLButtonElement).setPointerCapture(e.pointerId);
+    const move = (ev: PointerEvent) => {
+      const rect = img.getBoundingClientRect();
+      const x = Math.min(
+        mapW,
+        Math.max(0, ((ev.clientX - rect.left) / rect.width) * mapW)
+      );
+      const y = Math.min(
+        mapH,
+        Math.max(0, ((ev.clientY - rect.top) / rect.height) * mapH)
+      );
+      onMove(index, x, y);
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
 
   return (
     <div className="pointer-events-none absolute inset-0">
-      {dots.map((d) => (
-        <div
-          key={d.key}
-          className="absolute -translate-x-1/2 -translate-y-1/2"
+      {georef.map((g, i) => (
+        <button
+          key={i}
+          type="button"
+          className="absolute z-10 pointer-events-auto cursor-grab active:cursor-grabbing touch-none p-0 border-0 bg-transparent"
           style={{
-            left: offsetX + d.x * scaleX,
-            top: offsetY + d.y * scaleY,
+            left: `${(g.map.x / mapW) * 100}%`,
+            top: `${(g.map.y / mapH) * 100}%`,
+            width: 24,
+            height: 36,
+            transform: "translate(-50%, -100%)",
           }}
+          aria-label={`Move georef pin ${i + 1}`}
+          onPointerDown={(e) => startDrag(i, e)}
+          onClick={(e) => e.stopPropagation()}
         >
-          <div
-            className="w-6 h-6 rounded-full border-2 border-white flex items-center justify-center text-[10px] font-bold text-white shadow"
-            style={{ background: d.color }}
-          >
-            {d.label}
-          </div>
-        </div>
+          <HtmlMapPin color="#e74c3c" label={String(i + 1)} tipAnchor={false} />
+        </button>
       ))}
     </div>
   );

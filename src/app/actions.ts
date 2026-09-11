@@ -28,7 +28,7 @@ import {
   setReferenceParticipant,
   updateEvent,
 } from "@/lib/events";
-import { parseGpx } from "@/lib/gpx";
+import { parseGpx, trimTrackByFraction } from "@/lib/gpx";
 import {
   fillPrefixFromLegs,
   mergeTrackPoints,
@@ -64,7 +64,11 @@ export async function actionCreateEvent(formData: FormData) {
   const exercise_type = String(
     formData.get("exercise_type") || "normal"
   ) as ExerciseType;
-  const event = createEvent(name, exercise_type);
+  const occurredRaw = String(formData.get("occurred_on") || "").trim();
+  const occurred_on = /^\d{4}-\d{2}-\d{2}$/.test(occurredRaw)
+    ? occurredRaw
+    : undefined;
+  const event = createEvent(name, exercise_type, occurred_on);
   redirect(`/events/${event.id}`);
 }
 
@@ -81,7 +85,11 @@ export async function actionUpdateEventMeta(formData: FormData) {
   const name = String(formData.get("name") || "").trim();
   const exercise_type = String(formData.get("exercise_type")) as ExerciseType;
   const description = String(formData.get("description") || "");
-  updateEvent(id, { name, exercise_type, description });
+  const occurredRaw = String(formData.get("occurred_on") || "").trim();
+  const occurred_on = /^\d{4}-\d{2}-\d{2}$/.test(occurredRaw)
+    ? occurredRaw
+    : undefined;
+  updateEvent(id, { name, exercise_type, description, occurred_on });
   revalidatePath(`/events/${id}`);
   revalidatePath(`/events/${id}/setup`);
   revalidatePath(`/events/${id}/session`);
@@ -128,6 +136,12 @@ export async function actionSaveDisplayOptions(
     show_basemap?: boolean;
     show_control_symbols?: boolean;
     control_symbol_scale?: number;
+    show_course_line?: boolean;
+    course_line_weight?: number;
+    control_stroke_scale?: number;
+    runner_marker_scale?: number;
+    track_weight?: number;
+    trail_tail_ms?: number;
   }
 ) {
   await assertCanSetup();
@@ -321,6 +335,39 @@ export async function actionAppendGpxToRunner(
     return {
       ok: false,
       error: e instanceof Error ? e.message : "Append failed",
+    };
+  }
+}
+
+export async function actionTrimRunnerTrack(
+  eventId: string,
+  participantId: string,
+  startFrac: number,
+  endFrac: number
+): Promise<{ ok: true; pointCount: number } | { ok: false; error: string }> {
+  try {
+    await assertCanSetup();
+    assertParticipantInEvent(eventId, participantId);
+    const track = getTrackForParticipant(participantId);
+    if (!track) {
+      return { ok: false, error: "Runner has no track" };
+    }
+    const existing = loadTrackPoints(track);
+    if (existing.length < 2) {
+      return { ok: false, error: "Track is too short to trim" };
+    }
+    const points = trimTrackByFraction(existing, startFrac, endFrac);
+    if (points.length < 2) {
+      return { ok: false, error: "Trim would leave too few points" };
+    }
+    saveTrack(participantId, track.source_filename, points);
+    revalidatePath(`/events/${eventId}`);
+    revalidatePath(`/events/${eventId}/session`);
+    return { ok: true, pointCount: points.length };
+  } catch (e) {
+    return {
+      ok: false,
+      error: e instanceof Error ? e.message : "Trim failed",
     };
   }
 }
