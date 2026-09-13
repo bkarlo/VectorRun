@@ -7,24 +7,46 @@ const DATA_DIR =
   process.env.DATA_DIR?.trim() || path.join(process.cwd(), "data");
 const DB_PATH = path.join(DATA_DIR, "vectorrun.db");
 
+/** Must match the latest `user_version` pragma set in migrate(). */
+export const SCHEMA_USER_VERSION = 16;
+
 export function getDataDir() {
   return DATA_DIR;
+}
+
+export function getDbPath() {
+  return DB_PATH;
 }
 
 let db: Database.Database | null = null;
 
 export function getDb(): Database.Database {
   if (db) return db;
-
   fs.mkdirSync(DATA_DIR, { recursive: true });
   fs.mkdirSync(path.join(DATA_DIR, "uploads"), { recursive: true });
   fs.mkdirSync(path.join(DATA_DIR, "tracks"), { recursive: true });
-
-  db = new Database(DB_PATH);
-  db.pragma("journal_mode = WAL");
-  db.pragma("foreign_keys = ON");
-  migrate(db);
+  db = openDatabaseAt(DB_PATH);
   return db;
+}
+
+/** Close the process-wide connection so restore can replace the file. */
+export function closeDb() {
+  if (!db) return;
+  try {
+    db.close();
+  } catch {
+    /* already closed */
+  }
+  db = null;
+}
+
+export function openDatabaseAt(dbPath: string): Database.Database {
+  fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+  const database = new Database(dbPath);
+  database.pragma("journal_mode = WAL");
+  database.pragma("foreign_keys = ON");
+  migrate(database);
+  return database;
 }
 
 function tableColumns(database: Database.Database, table: string): Set<string> {

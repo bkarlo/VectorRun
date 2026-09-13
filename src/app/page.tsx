@@ -5,6 +5,7 @@ import { listEventCards } from "@/lib/events";
 import { isAuthRequired, isSetupUnlocked } from "@/lib/auth";
 import { EXERCISE_LABELS, type ExerciseType } from "@/lib/types";
 import { formatOccurredOn } from "@/lib/analysis";
+import BackupRestorePanel from "@/components/BackupRestorePanel";
 
 export const dynamic = "force-dynamic";
 
@@ -115,6 +116,8 @@ export default async function HomePage() {
             to create or edit events.
           </p>
         ) : null}
+
+        {canSetup ? <BackupRestorePanel /> : null}
 
         <section>
           <h2 className="font-display text-xl text-forest-900 mb-4">Events</h2>

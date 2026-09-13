@@ -87,6 +87,17 @@ Or skip seeding and upload GPX in the UI.
 3. **Optional Setup** — map georef (pins + satellite), punch radius, control-circle size.
 4. **Session** — replay, per-runner sync, speed chart, leg splits. Hide OSM or overlay controls if the map already has them. Override a bad punch from the runner list.
 
+## Backup & restore
+
+Coach-only (same as create/setup). On the home page:
+
+1. **Download backup** — a `.vrbak` zip of the SQLite database, map images, and GPX tracks.
+2. **Restore and replace all** — type `REPLACE` and upload that file. This overwrites the instance you restore onto (local or prod). Production is unchanged unless you restore there too.
+
+Copy production onto a laptop: download on the live site, restore locally, then `npm run dev`. Local VectorRun should be the same version as prod, or newer.
+
+Event-by-event export/merge is not in this release.
+
 ## Stack
 
 - Next.js (App Router) + TypeScript + Tailwind
