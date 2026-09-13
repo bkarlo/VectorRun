@@ -572,7 +572,9 @@ export function alignCourseVisits(
   }
 
   const best = dp[m][n];
-  if (best.matched < 2 || best.lastPunch <= best.firstPunch) return null;
+  if (!best || best.matched < 2 || best.lastPunch <= best.firstPunch) {
+    return null;
+  }
   if (opts?.requireAll && best.matched !== m) return null;
 
   const punchByCode: { code: string; idx: number }[] = [];
