@@ -84,6 +84,66 @@ export function courseHasForks(def: CourseDef | null | undefined): boolean {
   return def.steps.some((s) => s.type === "fork");
 }
 
+/** One realized linear path through exclusive/sequence forks. */
+export type LinearCoursePath = {
+  codes: string[];
+  forks: Record<string, string>;
+};
+
+/**
+ * Expand a course into candidate linearizations.
+ * Exclusive forks branch; sequence concatenates arms; any-order is unsupported.
+ */
+export function enumerateLinearCoursePaths(def: CourseDef): LinearCoursePath[] {
+  let paths: LinearCoursePath[] = [{ codes: [], forks: {} }];
+
+  const armControlCodes = (steps: CourseStep[]): string[] | null => {
+    const codes: string[] = [];
+    for (const s of steps) {
+      if (s.type !== "control") return null;
+      codes.push(s.code);
+    }
+    return codes;
+  };
+
+  for (const step of def.steps) {
+    if (step.type === "control") {
+      for (const p of paths) p.codes.push(step.code);
+      continue;
+    }
+    if (step.mode === "any_order") return [];
+    if (step.mode === "sequence") {
+      const extra: string[] = [];
+      for (const arm of step.arms) {
+        const codes = armControlCodes(arm.steps);
+        if (!codes) return [];
+        extra.push(...codes);
+      }
+      for (const p of paths) {
+        p.codes.push(...extra);
+        p.forks[step.id] = step.arms.map((a) => a.id).join(",");
+      }
+      continue;
+    }
+
+    const next: LinearCoursePath[] = [];
+    for (const p of paths) {
+      for (const arm of step.arms) {
+        const codes = armControlCodes(arm.steps);
+        if (!codes) continue;
+        next.push({
+          codes: [...p.codes, ...codes],
+          forks: { ...p.forks, [step.id]: arm.id },
+        });
+      }
+    }
+    paths = next;
+    if (paths.length === 0) return [];
+  }
+
+  return paths.filter((p) => p.codes.length >= 2);
+}
+
 export function parseCourseDef(raw: unknown): CourseDef | null {
   if (!raw || typeof raw !== "object") return null;
   const obj = raw as { version?: number; steps?: unknown };

@@ -9,7 +9,7 @@ import {
   type CourseDef,
 } from "./courseDef";
 import { getDb, getTracksDir, getUploadsDir } from "./db";
-import { defaultSyncStrategy } from "./sync";
+import { COURSE_ALIGN_VERSION, defaultSyncStrategy } from "./sync";
 import type {
   AnalysisPayload,
   ControlRow,
@@ -824,7 +824,8 @@ export function getOrComputeAnalysis(eventId: string): AnalysisPayload {
       payload.coursePhases === undefined ||
       firstPhase?.syncOffsets === undefined ||
       firstPhase?.windows === undefined ||
-      firstPhase?.realizedPath === undefined
+      firstPhase?.realizedPath === undefined ||
+      payload.courseAlign !== COURSE_ALIGN_VERSION
     ) {
       invalidateAnalysis(eventId);
     } else {
