@@ -89,12 +89,12 @@ Or skip seeding and upload GPX in the UI.
 
 ## Backup & restore
 
-Coach-only (same as create/setup). On the home page:
+Coach-only, unlisted: **`/admin`** (no link in the UI). If `SETUP_PASSWORD` is set, sign in first.
 
 1. **Download backup** — a `.vrbak` zip of the SQLite database, map images, and GPX tracks.
 2. **Restore and replace all** — type `REPLACE` and upload that file. This overwrites the instance you restore onto (local or prod). Production is unchanged unless you restore there too.
 
-Copy production onto a laptop: download on the live site, restore locally, then `npm run dev`. Local VectorRun should be the same version as prod, or newer.
+Copy production onto a laptop: download on the live `/admin` page, restore locally, then `npm run dev`. Local VectorRun should be the same version as prod, or newer.
 
 Event-by-event export/merge is not in this release.
 

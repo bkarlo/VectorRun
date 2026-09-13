@@ -47,7 +47,7 @@ export default function BackupRestorePanel() {
   };
 
   return (
-    <section className="panel rounded-2xl p-6 mb-10">
+    <section className="panel rounded-2xl p-6">
       <h2 className="font-display text-xl text-forest-900 mb-1">
         Backup & restore
       </h2>
