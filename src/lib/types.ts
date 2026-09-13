@@ -289,6 +289,8 @@ export interface AnalysisPayload {
   syncDeltasMs: Record<string, number>;
   referenceId: string | null;
   referenceWallTimeMs: number | null;
+  /** Bump when course-alignment / punch mapping changes so caches recompute. */
+  courseAlign?: number;
 }
 
 export const RUNNER_COLORS = [

@@ -218,16 +218,13 @@ export default function SessionWorkspace({
   const syncedTracks = useMemo(() => {
     const withPoints = initialTracks.filter((t) => t.points.length > 0);
     const windows = activeCourse?.windows ?? {};
-    const hasWindows = Object.keys(windows).length > 0;
 
     const slicedInputs = withPoints.map((t) => {
       const w = windows[t.participant.id];
       const points =
         w && w.toIdx >= w.fromIdx
           ? t.points.slice(w.fromIdx, w.toIdx + 1)
-          : hasWindows
-            ? []
-            : t.points;
+          : t.points;
       return { t, points };
     });
 

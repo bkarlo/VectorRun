@@ -1,5 +1,12 @@
 import { haversineM, indexNearestTime, interpolateAtTime } from "./gpx";
+import {
+  enumerateLinearCoursePaths,
+  type CourseDef,
+} from "./courseDef";
 import type { ControlRow, SyncStrategy, TrackPoint } from "./types";
+
+/** Stored on analysis payloads so punch-mapping changes invalidate cache. */
+export const COURSE_ALIGN_VERSION = 1;
 
 /** Tight punch circle (metres). Overridable per event. */
 export const PUNCH_RADIUS_M = 15;
@@ -8,6 +15,8 @@ export type PunchOptions = {
   radiusM?: number;
   /** Control code → original GPS time (ms) for manual punch overrides. */
   punchTimesByCode?: Record<string, number>;
+  /** If true, alignment must punch every course code (used for full-course slices). */
+  requireAll?: boolean;
 };
 
 export function effectivePunchRadiusM(opts?: PunchOptions): number {
@@ -68,19 +77,18 @@ export function courseSegmentIndices(
   radiusM = PUNCH_RADIUS_M
 ): { fromIdx: number; toIdx: number; punchIndices: number[] } | null {
   if (controls.length < 2 || points.length < 2) return null;
-  const punchIndices: number[] = [];
-  let searchFrom = 0;
-  for (let i = 0; i < controls.length; i++) {
-    const prefer: PunchPrefer = i === 0 ? "depart" : "arrive";
-    const idx = findPunchIndex(points, controls[i], searchFrom, radiusM, prefer);
-    if (idx < 0) return null;
-    punchIndices.push(idx);
-    searchFrom = idx + 1;
-  }
-  const fromIdx = punchIndices[0];
-  const toIdx = punchIndices[punchIndices.length - 1];
-  if (toIdx <= fromIdx) return null;
-  return { fromIdx, toIdx, punchIndices };
+  const codes = controls.map((_, i) => `#${i}`);
+  const byCode = new Map(codes.map((c, i) => [c, controls[i]]));
+  const aligned = alignCourseVisits(points, codes, byCode, 0, {
+    radiusM,
+    requireAll: true,
+  });
+  if (!aligned) return null;
+  return {
+    fromIdx: aligned.fromIdx,
+    toIdx: aligned.toIdx,
+    punchIndices: aligned.punchIndices,
+  };
 }
 
 /** Inclusive slice along the ordered course (all controls). */
@@ -114,11 +122,14 @@ const NEAR_BEST_M = 3;
 export type PunchPrefer = "arrive" | "depart";
 
 /**
- * Punch index for a control.
+ * Punch index for a single control (hunt / local search).
  * - arrive (default): among visits, pick the one that got *closest* to the
  *   flag (overshoot then return beats a distant first pass), then the latest
  *   sample near that closest approach.
  * - depart: leave the control circle — course start after rest at base.
+ *
+ * Do not walk a whole course with this: a later revisit after punching
+ * other controls can steal the punch. Course matching uses alignCourseVisits.
  */
 export function findPunchIndex(
   points: TrackPoint[],
@@ -178,7 +189,7 @@ function closestVisit(
   let bestDist = visitMinDist(points, control, best.entry, best.exit);
   for (let v = 1; v < visits.length; v++) {
     const d = visitMinDist(points, control, visits[v].entry, visits[v].exit);
-    // Closer visit wins; if similar, prefer the later one (return after overshoot).
+    // Hunt: closer visit wins; if similar, prefer the later one (return after overshoot).
     if (d < bestDist - 0.75) {
       best = visits[v];
       bestDist = d;
@@ -392,6 +403,212 @@ function controlPunchAbs(
   return idx >= 0 ? points[idx].time : null;
 }
 
+export type CourseVisitAlign = {
+  codes: string[];
+  punchIndices: number[];
+  fromIdx: number;
+  toIdx: number;
+  matched: number;
+  sumDist: number;
+};
+
+type CourseVisit = {
+  code: string;
+  entry: number;
+  arriveIdx: number;
+  departIdx: number;
+  minDist: number;
+};
+
+type AlignCell = {
+  matched: number;
+  sumDist: number;
+  firstPunch: number;
+  lastPunch: number;
+  prevCi: number;
+  prevVi: number;
+  takeVisit: number;
+};
+
+function alignBetter(a: AlignCell, b: AlignCell | undefined): boolean {
+  if (!b) return true;
+  if (a.matched !== b.matched) return a.matched > b.matched;
+  if (Math.abs(a.sumDist - b.sumDist) > 0.75) return a.sumDist < b.sumDist;
+  if (a.lastPunch !== b.lastPunch) return a.lastPunch < b.lastPunch;
+  return a.firstPunch < b.firstPunch;
+}
+
+function collectCourseVisits(
+  points: TrackPoint[],
+  codes: string[],
+  byCode: Map<string, { lat: number; lon: number }>,
+  fromIndex: number,
+  opts?: PunchOptions
+): CourseVisit[] {
+  const radius = effectivePunchRadiusM(opts);
+  const softR = softPunchRadiusM(radius);
+  const unique = [...new Set(codes)];
+  const visits: CourseVisit[] = [];
+
+  for (const code of unique) {
+    const ctrl = byCode.get(code);
+    if (!ctrl) continue;
+    if (opts?.punchTimesByCode?.[code] != null) {
+      const idx = indexNearestTime(
+        points,
+        opts.punchTimesByCode[code],
+        fromIndex
+      );
+      if (idx >= 0) {
+        visits.push({
+          code,
+          entry: idx,
+          arriveIdx: idx,
+          departIdx: idx,
+          minDist: 0,
+        });
+      }
+      continue;
+    }
+
+    let raw = collectVisits(points, ctrl, fromIndex, radius);
+    if (raw.length === 0) {
+      raw = collectVisits(points, ctrl, fromIndex, softR);
+    }
+    for (const v of raw) {
+      visits.push({
+        code,
+        entry: v.entry,
+        arriveIdx: latestNearClosestInStay(
+          points,
+          ctrl,
+          v.entry,
+          radius,
+          ARRIVE_MAX_STAY_MS
+        ),
+        departIdx: lastInRadius(points, ctrl, v.entry, radius),
+        minDist: visitMinDist(points, ctrl, v.entry, v.exit),
+      });
+    }
+  }
+
+  visits.sort((a, b) => a.entry - b.entry || a.minDist - b.minDist);
+  return visits;
+}
+
+/**
+ * Map a track onto a linear course.
+ *
+ * Hunt (same control, no other course punch yet): closest visit wins.
+ * After the runner punches elsewhere and comes back: pick the assignment
+ * that realizes the most of the course, then the closest punches.
+ */
+export function alignCourseVisits(
+  points: TrackPoint[],
+  codes: string[],
+  byCode: Map<string, { lat: number; lon: number }>,
+  fromIndex = 0,
+  opts?: PunchOptions
+): CourseVisitAlign | null {
+  if (points.length < 2 || codes.length < 2) return null;
+  const visits = collectCourseVisits(points, codes, byCode, fromIndex, opts);
+  const m = codes.length;
+  const n = visits.length;
+  if (n === 0) return null;
+
+  const empty: AlignCell = {
+    matched: 0,
+    sumDist: 0,
+    firstPunch: -1,
+    lastPunch: -1,
+    prevCi: -1,
+    prevVi: -1,
+    takeVisit: -1,
+  };
+  const dp: (AlignCell | undefined)[][] = Array.from({ length: m + 1 }, () =>
+    Array.from({ length: n + 1 }, () => undefined)
+  );
+  dp[0][0] = empty;
+
+  const consider = (ci: number, vi: number, cell: AlignCell) => {
+    if (alignBetter(cell, dp[ci][vi])) dp[ci][vi] = cell;
+  };
+
+  for (let ci = 0; ci <= m; ci++) {
+    for (let vi = 0; vi <= n; vi++) {
+      const cur = dp[ci][vi];
+      if (!cur) continue;
+      if (vi < n) {
+        consider(ci, vi + 1, {
+          ...cur,
+          prevCi: ci,
+          prevVi: vi,
+          takeVisit: -1,
+        });
+      }
+      if (ci < m) {
+        consider(ci + 1, vi, {
+          ...cur,
+          prevCi: ci,
+          prevVi: vi,
+          takeVisit: -1,
+        });
+      }
+      if (ci < m && vi < n && visits[vi].code === codes[ci]) {
+        const punch =
+          ci === 0 ? visits[vi].departIdx : visits[vi].arriveIdx;
+        if (cur.lastPunch >= 0 && punch <= cur.lastPunch) continue;
+        consider(ci + 1, vi + 1, {
+          matched: cur.matched + 1,
+          sumDist: cur.sumDist + visits[vi].minDist,
+          firstPunch: cur.firstPunch >= 0 ? cur.firstPunch : punch,
+          lastPunch: punch,
+          prevCi: ci,
+          prevVi: vi,
+          takeVisit: vi,
+        });
+      }
+    }
+  }
+
+  const best = dp[m][n];
+  if (best.matched < 2 || best.lastPunch <= best.firstPunch) return null;
+  if (opts?.requireAll && best.matched !== m) return null;
+
+  const punchByCode: { code: string; idx: number }[] = [];
+  let ci = m;
+  let vi = n;
+  const seen = new Set<string>();
+  while (ci > 0 || vi > 0) {
+    const cell = dp[ci][vi];
+    if (!cell) break;
+    if (cell.prevCi < 0 && cell.prevVi < 0) break;
+    const key = `${ci},${vi}`;
+    if (seen.has(key)) break;
+    seen.add(key);
+    if (cell.takeVisit >= 0) {
+      const visit = visits[cell.takeVisit];
+      const courseIdx = cell.prevCi;
+      const punch =
+        courseIdx === 0 ? visit.departIdx : visit.arriveIdx;
+      punchByCode.push({ code: codes[courseIdx], idx: punch });
+    }
+    ci = cell.prevCi;
+    vi = cell.prevVi;
+  }
+  punchByCode.reverse();
+  if (punchByCode.length < 2) return null;
+
+  return {
+    codes: punchByCode.map((p) => p.code),
+    punchIndices: punchByCode.map((p) => p.idx),
+    fromIdx: punchByCode[0].idx,
+    toIdx: punchByCode[punchByCode.length - 1].idx,
+    matched: best.matched,
+    sumDist: best.sumDist,
+  };
+}
+
 /** Real-time window for one course attempt on a raw (unsynced) track. */
 export interface CourseWindow {
   phaseId: string;
@@ -491,25 +708,18 @@ export function matchCourseWindow(
   opts?: PunchOptions
 ): { fromIdx: number; toIdx: number; punchIndices: number[] } | null {
   if (orderedControls.length < 2 || points.length < 2) return null;
-  const punchIndices: number[] = [];
-  let searchFrom = fromIndex;
-  for (let i = 0; i < orderedControls.length; i++) {
-    const prefer: PunchPrefer = i === 0 ? "depart" : "arrive";
-    const idx = punchIndexForControl(
-      points,
-      orderedControls[i],
-      searchFrom,
-      prefer,
-      opts
-    );
-    if (idx < 0) return null;
-    punchIndices.push(idx);
-    searchFrom = idx + 1;
-  }
-  const fromIdx = punchIndices[0];
-  const toIdx = punchIndices[punchIndices.length - 1];
-  if (toIdx <= fromIdx) return null;
-  return { fromIdx, toIdx, punchIndices };
+  const codes = orderedControls.map((_, i) => `#${i}`);
+  const byCode = new Map(codes.map((c, i) => [c, orderedControls[i]]));
+  const aligned = alignCourseVisits(points, codes, byCode, fromIndex, {
+    ...opts,
+    requireAll: opts?.requireAll ?? true,
+  });
+  if (!aligned) return null;
+  return {
+    fromIdx: aligned.fromIdx,
+    toIdx: aligned.toIdx,
+    punchIndices: aligned.punchIndices,
+  };
 }
 
 export interface CourseGraphMatch {
@@ -521,156 +731,47 @@ export interface CourseGraphMatch {
 }
 
 /**
- * Match a CourseDef (controls + exclusive forks) on a raw track.
- * At each exclusive fork, picks the arm whose first control punches earliest.
+ * Match a CourseDef on a raw track by aligning visits to the course.
+ * Exclusive forks: pick the linearization with the best alignment.
  */
 export function matchCourseGraph(
   points: TrackPoint[],
-  def: import("./courseDef").CourseDef,
+  def: CourseDef,
   byCode: Map<string, { lat: number; lon: number }>,
   fromIndex = 0,
   opts?: PunchOptions
 ): CourseGraphMatch | null {
   if (points.length < 2 || def.steps.length === 0) return null;
+  const paths = enumerateLinearCoursePaths(def);
+  let best: { align: CourseVisitAlign; forks: Record<string, string> } | null =
+    null;
 
-  const punchIndices: number[] = [];
-  const codes: string[] = [];
-  const forks: Record<string, string> = {};
-  let searchFrom = fromIndex;
-  let isFirst = true;
-
-  const punchControl = (code: string): number => {
-    const pt = byCode.get(code);
-    if (!pt) return -1;
-    const prefer: PunchPrefer = isFirst ? "depart" : "arrive";
-    const idx = punchIndexForControl(
-      points,
-      pt,
-      searchFrom,
-      prefer,
-      opts,
-      code
-    );
-    if (idx < 0) return -1;
-    punchIndices.push(idx);
-    codes.push(code);
-    searchFrom = idx + 1;
-    isFirst = false;
-    return idx;
-  };
-
-  const matchArmSteps = (
-    steps: import("./courseDef").CourseStep[],
-    startFrom: number,
-    firstPrefer: PunchPrefer
-  ): { indices: number[]; codes: string[]; endFrom: number } | null => {
-    let from = startFrom;
-    const indices: number[] = [];
-    const armCodes: string[] = [];
-    let first = true;
-    for (const s of steps) {
-      if (s.type !== "control") return null; // nested forks not matched in v1
-      const pt = byCode.get(s.code);
-      if (!pt) return null;
-      const prefer: PunchPrefer = first ? firstPrefer : "arrive";
-      const idx = punchIndexForControl(
-        points,
-        pt,
-        from,
-        prefer,
-        opts,
-        s.code
-      );
-      if (idx < 0) return null;
-      indices.push(idx);
-      armCodes.push(s.code);
-      from = idx + 1;
-      first = false;
-    }
-    return { indices, codes: armCodes, endFrom: from };
-  };
-
-  for (const step of def.steps) {
-    if (step.type === "control") {
-      if (punchControl(step.code) < 0) return null;
-      continue;
-    }
-
-    // Fork
-    if (step.mode === "any_order") return null;
-
-    if (step.mode === "sequence") {
-      // One-man relay: do all arms in order
-      for (const arm of step.arms) {
-        const matched = matchArmSteps(
-          arm.steps,
-          searchFrom,
-          isFirst ? "depart" : "arrive"
-        );
-        if (!matched) return null;
-        punchIndices.push(...matched.indices);
-        codes.push(...matched.codes);
-        searchFrom = matched.endFrom;
-        isFirst = false;
-      }
-      forks[step.id] = step.arms.map((a) => a.id).join(",");
-      continue;
-    }
-
-    // exclusive: pick arm with earliest first punch
-    type Cand = {
-      armId: string;
-      firstIdx: number;
-      firstDist: number;
-      indices: number[];
-      codes: string[];
-      endFrom: number;
-    };
-    const cands: Cand[] = [];
-    for (const arm of step.arms) {
-      const firstStep = arm.steps.find((s) => s.type === "control");
-      if (!firstStep || firstStep.type !== "control") continue;
-      const pt = byCode.get(firstStep.code);
-      if (!pt) continue;
-      const prefer: PunchPrefer = isFirst ? "depart" : "arrive";
-      const firstIdx = punchIndexForControl(
-        points,
-        pt,
-        searchFrom,
-        prefer,
-        opts,
-        firstStep.code
-      );
-      if (firstIdx < 0) continue;
-      const matched = matchArmSteps(arm.steps, searchFrom, prefer);
-      if (!matched) continue;
-      cands.push({
-        armId: arm.id,
-        firstIdx,
-        firstDist: haversineM(points[firstIdx], pt),
-        indices: matched.indices,
-        codes: matched.codes,
-        endFrom: matched.endFrom,
-      });
-    }
-    if (cands.length === 0) return null;
-    cands.sort((a, b) => {
-      if (a.firstIdx !== b.firstIdx) return a.firstIdx - b.firstIdx;
-      return a.firstDist - b.firstDist;
+  for (const path of paths) {
+    const align = alignCourseVisits(points, path.codes, byCode, fromIndex, {
+      ...opts,
+      requireAll: false,
     });
-    const best = cands[0];
-    forks[step.id] = best.armId;
-    punchIndices.push(...best.indices);
-    codes.push(...best.codes);
-    searchFrom = best.endFrom;
-    isFirst = false;
+    if (!align) continue;
+    if (
+      !best ||
+      align.matched > best.align.matched ||
+      (align.matched === best.align.matched &&
+        (align.sumDist < best.align.sumDist - 0.75 ||
+          (Math.abs(align.sumDist - best.align.sumDist) <= 0.75 &&
+            align.fromIdx < best.align.fromIdx)))
+    ) {
+      best = { align, forks: path.forks };
+    }
   }
 
-  if (punchIndices.length < 2) return null;
-  const fromIdx = punchIndices[0];
-  const toIdx = punchIndices[punchIndices.length - 1];
-  if (toIdx <= fromIdx) return null;
-  return { fromIdx, toIdx, punchIndices, codes, forks };
+  if (!best) return null;
+  return {
+    fromIdx: best.align.fromIdx,
+    toIdx: best.align.toIdx,
+    punchIndices: best.align.punchIndices,
+    codes: best.align.codes,
+    forks: best.forks,
+  };
 }
 
 /**

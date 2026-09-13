@@ -10,6 +10,7 @@ import {
 import {
   applyOffset,
   computeReferenceSync,
+  COURSE_ALIGN_VERSION,
   findPunchIndex,
   matchCourseGraph,
 } from "./sync";
@@ -424,6 +425,7 @@ export function analyzeEvent(
     syncDeltasMs: first?.syncDeltasMs ?? {},
     referenceId: first?.referenceId ?? referenceId,
     referenceWallTimeMs: first?.referenceWallTimeMs ?? null,
+    courseAlign: COURSE_ALIGN_VERSION,
   };
 }
 
