@@ -18,26 +18,29 @@ export function getDbPath() {
   return DB_PATH;
 }
 
-let db: Database.Database | null = null;
+const g = globalThis as typeof globalThis & {
+  __vectorrunDb?: Database.Database | null;
+};
 
 export function getDb(): Database.Database {
-  if (db) return db;
+  if (g.__vectorrunDb) return g.__vectorrunDb;
   fs.mkdirSync(DATA_DIR, { recursive: true });
   fs.mkdirSync(path.join(DATA_DIR, "uploads"), { recursive: true });
   fs.mkdirSync(path.join(DATA_DIR, "tracks"), { recursive: true });
-  db = openDatabaseAt(DB_PATH);
-  return db;
+  g.__vectorrunDb = openDatabaseAt(DB_PATH);
+  return g.__vectorrunDb;
 }
 
 /** Close the process-wide connection so restore can replace the file. */
 export function closeDb() {
-  if (!db) return;
+  const open = g.__vectorrunDb;
+  if (!open) return;
   try {
-    db.close();
+    open.close();
   } catch {
     /* already closed */
   }
-  db = null;
+  g.__vectorrunDb = null;
 }
 
 export function openDatabaseAt(dbPath: string): Database.Database {
