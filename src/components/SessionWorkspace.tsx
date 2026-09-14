@@ -160,6 +160,7 @@ export default function SessionWorkspace({
     "map"
   );
   const [mapFullscreen, setMapFullscreen] = useState(false);
+  const [displaySettingsOpen, setDisplaySettingsOpen] = useState(false);
   const [repairTargetId, setRepairTargetId] = useState("");
   const [mergeSourceId, setMergeSourceId] = useState("");
   const [fillLegs, setFillLegs] = useState<FillLegRow[]>([]);
@@ -1943,15 +1944,61 @@ export default function SessionWorkspace({
               {...sessionMapExtras}
             />
             <div className="absolute top-3 right-3 z-[1000] flex flex-col items-end gap-2">
-              <button
-                type="button"
-                onClick={() => setMapFullscreen(true)}
-                className="rounded-lg bg-white/95 border border-forest-200 shadow px-2.5 py-1.5 text-xs font-medium text-forest-800 hover:bg-forest-50"
-                title="Fullscreen map"
-              >
-                Fullscreen
-              </button>
-              <div className="rounded-lg bg-white/95 border border-forest-200 shadow px-2 py-1.5 flex flex-col gap-1 text-[11px] text-forest-800">
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setMapFullscreen(true)}
+                  className="rounded-lg bg-white/95 border border-forest-200 shadow px-2.5 py-1.5 text-xs font-medium text-forest-800 hover:bg-forest-50"
+                  title="Fullscreen map"
+                >
+                  Fullscreen
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setDisplaySettingsOpen((open) => !open)}
+                  className={`rounded-lg border shadow p-1.5 ${
+                    displaySettingsOpen
+                      ? "border-forest-400 bg-forest-100 text-forest-900"
+                      : "bg-white/95 border-forest-200 text-forest-800 hover:bg-forest-50"
+                  }`}
+                  title={displaySettingsOpen ? "Close map settings" : "Map settings"}
+                  aria-label={
+                    displaySettingsOpen ? "Close map settings" : "Map settings"
+                  }
+                  aria-expanded={displaySettingsOpen}
+                >
+                  <svg
+                    width="16"
+                    height="16"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    aria-hidden
+                  >
+                    <circle cx="12" cy="12" r="3" />
+                    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+                  </svg>
+                </button>
+              </div>
+              {displaySettingsOpen ? (
+              <div className="rounded-lg bg-white/95 border border-forest-200 shadow px-2 py-1.5 flex flex-col gap-1 text-[11px] text-forest-800 max-h-[min(70vh,28rem)] overflow-y-auto">
+                <div className="flex items-center justify-between gap-2 pb-0.5">
+                  <span className="text-[10px] uppercase tracking-wide text-forest-500">
+                    Map settings
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setDisplaySettingsOpen(false)}
+                    className="rounded px-1 text-forest-500 hover:bg-forest-50 hover:text-forest-800"
+                    title="Close map settings"
+                    aria-label="Close map settings"
+                  >
+                    ×
+                  </button>
+                </div>
                 <label className="flex items-center gap-1.5 cursor-pointer">
                   <input
                     type="checkbox"
@@ -2090,6 +2137,7 @@ export default function SessionWorkspace({
                   </button>
                 ) : null}
               </div>
+              ) : null}
             </div>
           </div>
 
